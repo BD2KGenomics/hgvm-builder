@@ -17,6 +17,46 @@ class ReferencePlan:
     
     """
     
+    def __init__(self):
+        """
+        Make a new empty reference build plan
+        """
+        
+        # We have one set of fields that are populated as the plan is built, and
+        # another set of fields that get populated when we read the database/ID
+        # conversion files and import the FASTA and VCF files into Toil.
+        
+        # These all hold the URLs that we get given when building up the plan
+        
+        # This holds possibly-gzipped FASTAs containing primary scaffolds, as a
+        # list of URLs
+        self.primary_fasta_urls = []
+        # This holds a list of the primary scaffold chromosome name/number
+        # assignment file URLs
+        self.primary_name_urls = []
+        # This holds possibly-gzipped FASTAs containing alt scaffolds and
+        # patches, as a list of URLs
+        self.alt_fasta_urls = []
+        # This holds a list of alt scaffold placement database file URLs
+        self.alt_placement_urls = []
+        # This holds a dict from chromosome name/number to relevant VCF URL.
+        self.vcf_urls = {}
+        
+        # After we load all the databases and import all the input files into
+        # Toil, we populate these fields.
+        
+        # This dict maps from alt scaffold accession.version string to parent
+        # scaffold accession.version string
+        self.alt_parents = {}
+        # This dict maps primary scaffold accession.version to chromosome name,
+        # if any.
+        self.primary_names = {}
+        # This dict maps from chromosome name to a Toil file ID for the VCF for
+        # that chromosome, if any.
+        self.vcf_ids = {}
+        
+        
+    
     def add_primary_scaffold_fasta(self, url):
         """
         Adds the (possibly gzipped) FASTA at the given URL as a FASTA known to
@@ -24,6 +64,16 @@ class ReferencePlan:
         chrM, and other top-level unplaced scaffolds).
         
         FASTA records should be named as accession.version.
+        """
+        
+        raise NotImplementedError
+        
+    def add_primary_scaffold_names(self, url):
+        """
+        Adds the TSV at the given URL, in GRC chr2acc format (chromosome
+        number/X/Y/MT and accession.version, with #-comments) to the database of
+        chromosome to accession.version mappings. This database is then used to
+        interpret VCFs.
         """
         
         raise NotImplementedError
@@ -52,21 +102,11 @@ class ReferencePlan:
         
         raise NotImplementedError
         
-    def add_primary_scaffold_names(self, url):
-        """
-        Adds the TSV at the given URL, in GRC chr2acc format (chromosome
-        number/X/Y/MT and accession.version, with #-comments) to the database of
-        chromosome to accession.version mappings. This database is then used to
-        interpret VCFs.
-        """
-        
-        raise NotImplementedError
-        
     def add_variants(self, chromosome_name, url): 
         """
-        Adds the gzipped VCF at the given URL (with associated index at
-        <url>.tbi) as variants to be applied to the given chromosome number or
-        X/Y/MT name. Only one VCF is allowed per chromosome.
+        Adds the gzipped VCF at the given URL as variants to be applied to the
+        given chromosome number or X/Y/MT name. Only one VCF is allowed per
+        chromosome.
         """
         
         raise NotImplementedError
