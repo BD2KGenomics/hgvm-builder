@@ -1,5 +1,9 @@
 #hgvm-builder plan.py: Represent reference graph build plans as objects
 
+import urllib2
+
+import tsv
+
 class ReferencePlan:
     """
     Represents a plan to build a graph reference, or (Human) Genome Variation
@@ -14,6 +18,10 @@ class ReferencePlan:
     path names (which should all be in accession.version format), and what alt
     contigs are children of what primary contigs (and so should be aligned to
     them).
+    
+    After making a plan, and adding FASTAs, VCFs, and metadata files to it with
+    the appropriate methods, call bake() to download the metadata and import the
+    data files into a Toil filestore.
     
     """
     
@@ -54,7 +62,17 @@ class ReferencePlan:
         # This dict maps from chromosome name to a Toil file ID for the VCF for
         # that chromosome, if any.
         self.vcf_ids = {}
+        # This list contains the Toil file store IDs for all the input possibly-
+        # gzipped FASTAs with primary scaffolds.
+        self.primary_ids = []
+        # This list contains the Toil file store IDs for all the input possibly-
+        # gzipped FASTAs with alt scaffolds.
+        self.alt_ids = []
         
+        # We're going to have to split the primary FASTAs up and shuffle them to
+        # be with the right alt FASTA sequences and VCFs. But we'll do that
+        # later, not in the plan setup, because we have to break open a large
+        # number of FASTAs.
         
     
     def add_primary_scaffold_fasta(self, url):
@@ -66,7 +84,7 @@ class ReferencePlan:
         FASTA records should be named as accession.version.
         """
         
-        raise NotImplementedError
+        self.primary_fasta_urls.append(url)
         
     def add_primary_scaffold_names(self, url):
         """
@@ -76,7 +94,7 @@ class ReferencePlan:
         interpret VCFs.
         """
         
-        raise NotImplementedError
+        self.primary_name_urls.append(url)
         
     def add_alt_scaffold_fasta(self, url):
         """
@@ -90,7 +108,7 @@ class ReferencePlan:
         executed.
         """
         
-        raise NotImplementedError
+        self.alt_fasta_urls.append(url)
         
     def add_alt_scaffold_placement(self, url):
         """
@@ -100,7 +118,7 @@ class ReferencePlan:
         mapping to the appropriate chromosome, so it can be done in parallel.
         """
         
-        raise NotImplementedError
+        self.alt_placement_urls.append(url)
         
     def add_variants(self, chromosome_name, url): 
         """
@@ -109,7 +127,13 @@ class ReferencePlan:
         chromosome.
         """
         
-        raise NotImplementedError
+        if self.vcf_urls.has_key(chromosome_name):
+            # We already have a VCF for this chromosome
+            raise RuntimeError(
+                "Duplicate chromosome name {} adding VCF {} to plan".format(
+                chromosome_name, url))
+                
+        self.vcf_urls[chromosome_name] = url
         
     def add_sample(self, fastq_url):
         """
@@ -120,6 +144,102 @@ class ReferencePlan:
         """
         
         raise NotImplementedError
+        
+    def bake(self, import_function):
+        """
+        "Bake" the plan by downloading metadata and importing data files into a
+        file storage system. Requires a function that can take a URL and load it
+        into a file storage system, returning an ID from which the file can be
+        retrieved. Generally you would get this from something like:
+        
+            with toil.common.Toil as file_importer:
+                plan.bake(lambda url: file_importer.importFile(url))
+        
+        But we don't want to attach directly to Toil here, so you can pass in
+        anything you want.
+        """
+        
+        # Download the metadata files
+        
+        for name_url in self.primary_name_urls:
+            # Download and parse all the primary scaffold chromosome names
+            self.parse_name_stream(urllib2.urlopen(name_url))
+            
+        for placement_url in self.alt_placement_urls:
+            # Download and parse all the alt scaffold parent information
+            self.parse_placement_stream(urllib2.urlopen(placement_url))
+        
+        # Import all the data files
+        
+        for primary_url in self.primary_fasta_urls:
+            # Import all the primary FASTAs
+            self.primary_ids.append(import_function(primary_url))
+            
+        for alt_url in self.alt_fasta_urls:
+            # Import all the alt FASTAs
+            self.alt_ids.append(import_function(alt_url))
+        
+        
+    def set_primary_name(self, accession, name):
+        """
+        Set the chromosome name for a primary scaffold. Takes the
+        accession.version string (like "LOL1234.1") and the chromosome name
+        string (like "1" or "MT").
+        """
+
+        self.primary_names[accession] = name
+        
+    def set_alt_parent(self, alt_accession, parent_accession):
+        """
+        Takes the accession.version string (like "LOL1234.1") fort an alt
+        scaffold and a primary scaffold, and makes the primary scaffold the
+        parent of the alt scaffold. This means that the alt scaffold will be
+        aligned against and merged into the subgraph derived from the primary
+        scaffold and ist other alt scaffolds.
+        """
+
+        self.alt_parents[alt_accession] = parent_accession
+        
+    def parse_name_stream(self, stream):
+        """
+        Parse GRC chr2acc format (TSV of name and accession.version) on the
+        given input stream, and make the appropriate primary scaffold name
+        assignments.
+        """
+        
+        # Make a TSV reader
+        reader = tsv.TsvReader(stream)
+        
+        for name, accession in reader:
+            # Apply each name/accession mapping
+            self.set_primary_name(accession, name)
+            
+    def parse_placement_stream(self, stream):
+        """
+        Parse GRC alt_scaffold_placement.txt format (TSV with alt
+        accession.version on column 4 and parent accession.version on column 7)
+        on the given input stream, and make the appropriate parent assignments.
+        """
+        
+        # Make a TSV reader
+        reader = tsv.TsvReader(stream)
+        
+        for parts in reader:
+            # Look at each non-comment line
+            
+            if len(parts) < 7:
+                # We can't pull out the parent
+                raise RuntimeError(
+                    "Insufficient columns in alt scaffold location data")
+            
+            # Make the alt (1-based column 4) a child of the parent (1-based
+            # column 7)
+            self.set_alt_parent(parts[3], parts[6])
+            
+                   
+        
+        
+        
 
 
 

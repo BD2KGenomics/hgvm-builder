@@ -21,6 +21,8 @@ import sys
 from toil.job import Job
 from toil.realtimeLogger import RealtimeLogger
 
+from .plan import ReferencePlan
+
 def parse_args(args):
     """
     Takes in the command-line arguments list (args), and returns a nice argparse
@@ -54,6 +56,20 @@ def parse_args(args):
     args = args[1:]
         
     return parser.parse_args(args)
+   
+def create_plan(assembly_structure):
+    """
+    Given an FTP url to the root of a GRC-format assembly_structure directory
+    tree, produce a ReferencePlan describing that assembly.
+    
+    Recursively traverses the FTP directory structure and finds the avrious
+    FASTAs and metadata files and adds their URLs to the plan.
+    """
+    
+    # Make the plan
+    plan = ReferencePlan()
+    
+    # TODO: open the URL to the assembly, traverse it, and populate the plan
    
 def main_job(job, options):
     """
