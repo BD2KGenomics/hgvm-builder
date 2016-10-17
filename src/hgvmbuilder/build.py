@@ -83,9 +83,18 @@ def main(args):
         raise Exception("{} jobs failed!".format(failed_jobs))
         
     print("All jobs completed successfully")
+    return 0
+    
+def entrypoint():
+    """
+    0-argument entry point for setuptools to call.
+    """
+    
+    # Provide main with its arguments and handle exit codes
+    sys.exit(main(sys.argv))
     
 if __name__ == "__main__" :
-    sys.exit(main(sys.argv))
+    entrypoint()
         
         
         

@@ -18,7 +18,7 @@ kwargs = dict(
     package_dir={'': 'src'},
     packages=find_packages('src'),
     entry_points={
-        'console_scripts': ['build-hgvm = hgvmbuilder.build:main']})
+        'console_scripts': ['build-hgvm = hgvmbuilder.build:entrypoint']})
 
 class PyTest(TestCommand):
     user_options = [('pytest-args=', 'a', "Arguments to pass to py.test")]
@@ -61,7 +61,10 @@ https://github.com/BD2KGenomics/toil/tree/master/contrib/azure
 
 For more information, please refer to Toil's documentation at
 
-http://toil.readthedocs.io/en/latest/installation.html 
+http://toil.readthedocs.io/en/latest/installation.html
 
+To start building HGVMs, run
+
+build-hgvm --help 2>&1 | less
 """.format(required_versions['toil']))
 
