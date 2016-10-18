@@ -26,6 +26,7 @@ from toil.realtimeLogger import RealtimeLogger
 from .plan import ReferencePlan
 from . import grcparser
 from . import thousandgenomesparser
+from .vcfrewriter import VcfRewriter
 
 # Get a submodule-global logger
 Logger = logging.getLogger("build")
@@ -86,13 +87,52 @@ def create_plan(assembly_url, vcfs_url):
     # Return the completed plan
     return plan
     
+def rewrite_vcf_job(job, options, plan, vcf_id):
+    """
+    Given the ID of a vcf file (as well as the options and plan), return the ID
+    of a rewritten VCF where chromosome names have been translated into
+    accession.version format.
+    """
+    
+    # Make a rewriter to rewrite the VCF
+    rewriter = VcfRewriter(plan.get_name_translation())
+    
+    
+    with job.fileStore.readGlobalFileStream(vcf_id) as input_stream:
+        # Read the input file
+        
+        with job.fileStore.writeGlobalFileStream(cleanup=True) as \
+            (output_stream, new_id):
+            # Fill the output file
+            
+            # Rewrite VCF from one stream to the other
+            rewriter.rewrite_stream(input_stream, output_stream)
+        
+    RealTimeLogger.info("Rewrote VCF to {}".format(new_id))
+        
+    # Return the ID for the rewritten, uncompressed, unindexed VCF
+    return new_id
+    
+    # TODO: compress VCF with bgzip, index with tabix
+    
 def main_job(job, options, plan):
     """
-    Root Toil job. Right now does nothing.
+    Root Toil job. Execute the plan.
     """
-    # TODO: implement
-    pass
-   
+
+    # Farm out jobs to break up all the FASTAs by pertinent chromosome
+    
+    # Collect together file IDs for all the chromosomes for primary (where there
+    # should be one) and the alts
+    
+    for chromosome_name, vcf_id in plan.for_each_vcf_id_by_chromosome():
+        # In parallel we can take the VCFs and translate them to
+        # accession.version. Then we have to re-compress and re-index.
+        
+        new_id = job.addChildJobFn(rewrite_vcf_job, options, plan, vcf_id).rv()
+        
+        # TODO: pass to re-indexing child.
+        
 def main(args):
     """
     Parses command line arguments and do the work of the program.

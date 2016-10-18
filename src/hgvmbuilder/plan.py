@@ -148,6 +148,23 @@ class ReferencePlan:
         
         raise NotImplementedError
         
+    def get_name_translation(self):
+        """
+        Return a dict from chromosome name (like "1") to accession.version (like
+        "ABC123.2").
+        """
+        
+        # Basically just need to reverse the dict we are storing
+        return {name: accession for accession, name
+            in self.primary_names.iteritems()}
+            
+    def for_each_vcf_id_by_chromosome(self):
+        """
+        Iterate through (chromosome name, VCF file ID) pairs.
+        """
+        
+        return self.vcf_ids.iteritems()
+        
     def bake(self, import_function):
         """
         "Bake" the plan by downloading metadata and importing data files into a
