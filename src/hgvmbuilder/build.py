@@ -19,6 +19,7 @@ import os
 import os.path
 import sys
 
+from toil.common import Toil
 from toil.job import Job
 from toil.realtimeLogger import RealtimeLogger
 
@@ -104,23 +105,30 @@ def main(args):
     # Set up logging
     logging.basicConfig(level=logging.INFO)
     
-    # Build the plan on the head node
-    plan = create_plan(options.assembly_url, options.vcfs_url)
-    
-    return 1
-    
-    # Make a root job
-    root_job = Job.wrapJobFn(main_job, options, plan,
-        cores=1, memory="1G", disk="1G")
-    
-    # Run it and see how many jobs fail. Automatically handles RealtimeLogger
-    # messages
-    failed_jobs = Job.Runner.startToil(root_job,  options)
-    
-    if failed_jobs > 0:
-        raise Exception("{} jobs failed!".format(failed_jobs))
+    # Start up Toil
+    with Toil(options) as toil_instance:
         
-    print("All jobs completed successfully")
+        if toil_instance.options.restart:
+            # We're re-running
+            toil_instance.restart()
+        else:
+            # Run from the top
+        
+            # Build the plan on the head node
+            plan = create_plan(options.assembly_url, options.vcfs_url)
+        
+            # Import all the files from the plan. Now the plan will hold Toil IDs
+            # for data files, and actual info for metadata files.
+            plan.bake(lambda url: toil_instance.importFile(url))
+    
+            # Make a root job
+            root_job = Job.wrapJobFn(main_job, options, plan,
+                cores=1, memory="1G", disk="1G")
+            
+            # Run the root job
+            toil_instance.start(root_job)
+        
+    print("Toil workflow complete")
     return 0
     
 def entrypoint():

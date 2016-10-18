@@ -22,8 +22,6 @@ def parse(plan, vcf_root):
     # Open the URL
     connection = FTPOrFilesystemConnection(vcf_root)
     
-    Logger.info("Connected to {}".format(vcf_root))
-    
     # Define the chromosome identification regex
     chrom_finder = re.compile("chr([0-9A-Za-z]+)")
     

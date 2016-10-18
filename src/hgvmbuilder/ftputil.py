@@ -27,6 +27,12 @@ class FTPOrFilesystemConnection:
         
         # Save the base URL
         self.base_url = base_url
+        
+        # Make sure it has a trailing / for urljoin to work and put things
+        # inside of here.
+        if not self.base_url.endswith("/"):
+            self.base_url = self.base_url + "/"
+        
 
         # Split up the URL
         parts = urlparse.urlparse(base_url)
@@ -81,6 +87,13 @@ class FTPOrFilesystemConnection:
         """
         Returns the full URL to the given root-relative path.
         """
+        
+        # Strip leading slashes from the input path, so we always look inside
+        # our base path.
+        path = path.lstrip("/")
+        
+        # We know our base URL has a trailing slash, so we can just urljoin onto
+        # it.
         return urlparse.urljoin(self.base_url, path)
 
 def backoff_times(retries=float("inf"), base_delay=300):

@@ -1,8 +1,11 @@
 #hgvm-builder plan.py: Represent reference graph build plans as objects
 
+import logging
 import urllib2
 
 import tsv
+
+Logger = logging.getLogger("plan")
 
 class ReferencePlan:
     """
@@ -152,8 +155,8 @@ class ReferencePlan:
         into a file storage system, returning an ID from which the file can be
         retrieved. Generally you would get this from something like:
         
-            with toil.common.Toil as file_importer:
-                plan.bake(lambda url: file_importer.importFile(url))
+            with toil.common.Toil(options) as toil_instance:
+                plan.bake(lambda url: toil_instance.importFile(url))
         
         But we don't want to attach directly to Toil here, so you can pass in
         anything you want.
@@ -173,11 +176,21 @@ class ReferencePlan:
         
         for primary_url in self.primary_fasta_urls:
             # Import all the primary FASTAs
-            self.primary_ids.append(import_function(primary_url))
+            imported_id = import_function(primary_url)
+            Logger.info("Imported primary {} as {}".format(primary_url, imported_id))
+            self.primary_ids.append(imported_id)
             
         for alt_url in self.alt_fasta_urls:
             # Import all the alt FASTAs
-            self.alt_ids.append(import_function(alt_url))
+            imported_id = import_function(alt_url)
+            Logger.info("Imported alt {} as {}".format(alt_url, imported_id))
+            self.alt_ids.append(imported_id)
+            
+        for chrom_name, vcf_url in self.vcf_urls.iteritems():
+            # Import all the VCFs
+            imported_id = import_function(vcf_url)
+            Logger.info("Imported VCF {} as {}".format(vcf_url, imported_id))
+            self.vcf_ids[chrom_name] = imported_id
         
         
     def set_primary_name(self, accession, name):
