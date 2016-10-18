@@ -176,9 +176,7 @@ class FakeFTP:
         Logger.debug("Fake FTP root: {} cwd: {}".format(self.root,
             self.relative_path))
         
-        # Can't use os.path.join here because relative_path needs to be relative
-        # even if it starts with a slash.
-        dir_path = self.root + self.relative_path
+        dir_path = os.path.join(self.root, self.relative_path)
         
         if os.path.isdir(dir_path):
             # Only directories have anything in them
@@ -190,7 +188,7 @@ class FakeFTP:
         """
         Change to the given directory relative to the root.
         """
-        self.relative_path = path
+        self.relative_path = path.lstrip("/")
 
 def robust_nlst(ftp, path):
     """

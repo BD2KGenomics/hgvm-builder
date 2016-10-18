@@ -24,6 +24,7 @@ from toil.realtimeLogger import RealtimeLogger
 
 from .plan import ReferencePlan
 from . import grcparser
+from . import thousandgenomesparser
 
 # Get a submodule-global logger
 Logger = logging.getLogger("build")
@@ -50,11 +51,14 @@ def parse_args(args):
     Job.Runner.addToilOptions(parser)
     
     # General options
-    parser.add_argument("--assembly_structure",
+    parser.add_argument("--assembly_url",
         default=("ftp://ftp.ncbi.nlm.nih.gov/genomes/all/"
         "GCA_000001405.24_GRCh38.p9/"
         "GCA_000001405.24_GRCh38.p9_assembly_structure"),
         help="root of input assembly structure in GRC format")
+    parser.add_argument("--vcfs_url", default=("ftp://ftp.1000genomes.ebi.ac.uk/"
+        "vol1/ftp/release/20130502/supporting/GRCh38_positions"),
+        help="directory of VCFs per chromosome") 
     
     # The command line arguments start with the program name, which we don't
     # want to treat as an argument for argparse. So we remove it.
@@ -62,23 +66,23 @@ def parse_args(args):
         
     return parser.parse_args(args)
    
-def create_plan(assembly_structure):
+def create_plan(assembly_url, vcfs_url):
     """
     Given an FTP or file url to the root of a GRC-format assembly_structure
-    directory tree, produce a ReferencePlan describing that assembly.
-    
-    Recursively traverses the directory structure and finds the various
-    FASTAs and metadata files and adds their URLs to the plan.
+    directory tree, and an FTP or file URL to a directory of chrXXX VCFs,
+    produce a ReferencePlan describing that assembly and those VCFs.
     """
     
     # Make the plan
     plan = ReferencePlan()
 
     # Parse the assembly and populate the plan    
-    grcparser.parse(plan, assembly_structure)
+    grcparser.parse(plan, assembly_url)
     
-    # Now we have added everything to the plan that comes from the GRC-format
-    # assembly. We still may need VCFs, but that's up to the caller
+    # Parse the VCF directory and add the VCFs
+    thousandgenomesparser.parse(plan, vcfs_url)
+    
+    # Return the completed plan
     return plan
     
 def main_job(job, options, plan):
@@ -101,7 +105,7 @@ def main(args):
     logging.basicConfig(level=logging.INFO)
     
     # Build the plan on the head node
-    plan = create_plan(options.assembly_structure)
+    plan = create_plan(options.assembly_url, options.vcfs_url)
     
     return 1
     
