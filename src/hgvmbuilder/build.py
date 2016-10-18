@@ -23,7 +23,7 @@ from toil.job import Job
 from toil.realtimeLogger import RealtimeLogger
 
 from .plan import ReferencePlan
-from .ftputil import FTPOrFilesystemConnection
+from . import grcparser
 
 # Get a submodule-global logger
 Logger = logging.getLogger("build")
@@ -73,72 +73,9 @@ def create_plan(assembly_structure):
     
     # Make the plan
     plan = ReferencePlan()
-    
-    # Open the URL
-    connection = FTPOrFilesystemConnection(assembly_structure)
-    
-    for assembly_unit_root in connection.list_children(""):
-        # For each assembly unit
-        Logger.debug("Assembly unit: {}".format(assembly_unit_root))
-        for scaffold_category in connection.list_children(assembly_unit_root):
-            # For everything under that
-            
-            # Get the base name (last path component)
-            basename = os.path.basename(scaffold_category)
-            
-            Logger.debug("Scaffold category: {}".format(basename))
-            
-            if basename == "placed_scaffolds":
-                # These are redundant with the actual assembled contigs
-                continue
-            elif basename == "alt_scaffolds":
-                # Remember everything in here is alts
-                is_alt = True
-            else:
-                # Otherwise the FASTAs we find will represent primary sequences
-                is_alt = False
-                
-            for item in connection.list_children(scaffold_category):
-                # For every tiem in there (FASTA directory, chr2acc,
-                # alt_scaffold_placement.txt, etc.)
-                
-                # Get the base name (last path component)
-                item_basename = os.path.basename(item)
-                
-                Logger.debug("Child item: {}".format(item_basename))
-                
-                if item_basename == "chr2acc":
-                    # This file contains primary chromosome names
-                    Logger.info("Chromosome names: {}".format(item))
-                    plan.add_primary_scaffold_names(connection.get_url(item))
-                elif item_basename == "alt_scaffold_placement.txt":
-                    # This file contains alt scaffold placements
-                    Logger.info("Alt placements: {}".format(item))
-                    plan.add_alt_scaffold_placements(connection.get_url(item))
-                elif item_basename == "FASTA":
-                    # Look for FASTA files in there
-                    for file_path in connection.list_children(item):
-                        # For each file
-                        if (file_path.endswith(".fa") or
-                            file_path.endswith(".fa.gz") or
-                            file_path.endswith(".fna") or
-                            file_path.endswith(".fna.gz")):
-                            
-                            # This is a legit-looking FASTA (and probably not a
-                            # directory)
-                            
-                            if is_alt:
-                                # Add this FASTA as containing alt scaffolds
-                                Logger.info("Alt FASTA: {}".format(file_path))
-                                plan.add_alt_scaffold_fasta(connection.get_url(
-                                    file_path))
-                            else:
-                                # Add this FASTA as containing primary scaffolds
-                                Logger.info("Primary FASTA: {}".format(
-                                    file_path))
-                                plan.add_primary_scaffold_fasta(
-                                    connection.get_url(file_path))
-                                    
+
+    # Parse the assembly and populate the plan    
+    grcparser.parse(plan, assembly_structure)
     
     # Now we have added everything to the plan that comes from the GRC-format
     # assembly. We still may need VCFs, but that's up to the caller
