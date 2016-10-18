@@ -110,7 +110,7 @@ class ReferencePlan:
         
         self.alt_fasta_urls.append(url)
         
-    def add_alt_scaffold_placement(self, url):
+    def add_alt_scaffold_placements(self, url):
         """
         Adds the TSV at the given URL, in GRC alt_scaffold_placement.txt format,
         as a database of child alt scaffold to parent primary scaffold mappings.

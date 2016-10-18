@@ -33,10 +33,14 @@ class FTPOrFilesystemConnection:
         
         if parts.scheme == "ftp":
             # If it's an FTP URL open an FTP connection
-            self.connection = ftp_connect(base_url)
+            self.connection, self.base_path = ftp_connect(base_url)
             
-            # We also need the base path
-            self.base_path = parts.path
+            if not self.base_path.endswith("/"):
+                # We need the trailing slash for urljoin to work
+                self.base_path = self.base_path + "/"
+            
+            Logger.debug("Connected to {} with base path {}".format(
+                base_url, self.base_path))
         elif parts.scheme == "file":
             # If it's a File URL make a FakeFTP
             self.connection = FakeFTP(parts.path)
@@ -55,28 +59,29 @@ class FTPOrFilesystemConnection:
         relative paths. If the path refers to a file, there will be no children.
         """
         
-        for child in robust_nlst(self.connection,
-            os.path.join(self.base_path, path)):
+        if len(path) > 0 and not path.endswith("/"):
+            # We need a trailing slash after a real directory name for urljoin
+            # to work later
+            path = path + "/"
+        
+        # Strip leading slashes from the input path, so we always look inside
+        # our base path.
+        path = path.lstrip("/")
+        
+        # Construct the path to actually go to on the FTP server
+        ftp_path = urlparse.urljoin(self.base_path, path)
+        
+        Logger.debug("Listing {}".format(ftp_path))
+        
+        for child in robust_nlst(self.connection, ftp_path):
             # For every child, build a root-relative URL
-            child_path = path
-            if not child_path.endswih("/"):
-                child_path = child_path + "/"
-            child_path = child_path + child
-            yield child_path
+            yield urlparse.urljoin(path, child)
         
     def get_url(self, path):
         """
         Returns the full URL to the given root-relative path.
         """
-        
-        # Start with our base URL
-        url = self.base_url
-        
-        if not url.endswith("/"):
-            # Make sure there's a slash before the relative path
-            url = url + "/"
-        
-        return url + path
+        return urlparse.urljoin(self.base_url, path)
 
 def backoff_times(retries=float("inf"), base_delay=300):
     """
@@ -162,13 +167,13 @@ class FakeFTP:
         # We need to be able to change directories
         self.relative_path = ""
         
-        Logger.info("Fake FTP root: {}".format(self.root))
+        Logger.debug("Fake FTP root: {}".format(self.root))
         
     def nlst(self):
         """
         Return a list of all the files in the current directory.
         """
-        Logger.info("Fake FTP root: {} cwd: {}".format(self.root,
+        Logger.debug("Fake FTP root: {} cwd: {}".format(self.root,
             self.relative_path))
         
         # Can't use os.path.join here because relative_path needs to be relative
