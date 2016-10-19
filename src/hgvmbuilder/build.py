@@ -109,7 +109,7 @@ def rewrite_vcf_job(job, options, plan, vcf_id):
             # Rewrite VCF from one stream to the other
             rewriter.rewrite_stream(input_stream, output_stream)
         
-    RealTimeLogger.info("Rewrote VCF to {}".format(new_id))
+    RealtimeLogger.info("Rewrote VCF to {}".format(new_id))
         
     # Return the ID for the rewritten, uncompressed, unindexed VCF
     return new_id

@@ -2,6 +2,7 @@
 
 from collections import OrderedDict
 import logging
+import re
 
 import vcf
 
@@ -24,18 +25,50 @@ class VcfRewriter(object):
         
         self.translation = translation
         
-    def rewrite_stream(self, input_stream, output_stream):
+    def fix_stream(self, input_stream):
         """
-        Rewrite the VCF data from the given possibly-compressed VCF data stream
-        to the given output stream, in uncompressed format.
+        Scan the given (possibly compressed) input stream for fixable VCF
+        errors, and fix them. Yields all lines as output.
+        
+        Currently only fixes missing description quotes in INFO lines, since the
+        1000 Genomes VCFs have instances of that error.
         """
         
         # We handle our decompression ourselves, transparently, based on stream
         # content
         decompressed_stream = TransparentUnzip(input_stream)
         
+        # We're looking for broken INFO lines that don't have leading quotes on
+        # descriptions.
+        info_desc_missing_leading_quote = re.compile(
+            r'''(##INFO=<.*Description=)([^"][^"]*".*>.*)''',
+            re.DOTALL)
+        
+        for line in decompressed_stream:
+            # Check each line for this error
+            match = info_desc_missing_leading_quote.match(line)
+            
+            if match is not None:
+                # Insert the missing quote
+                line = match.group(1) + "\"" + match.group(2)
+                
+            # Give out all the fixed-up lines
+            yield line
+        
+        
+    def rewrite_stream(self, input_stream, output_stream):
+        """
+        Rewrite the VCF data from the given possibly-compressed VCF data stream
+        to the given output stream, in uncompressed format.
+        
+        Fixes fixable errors and renames contigs.
+        """
+        
+        # Fix (and maybe decompress) the input stream
+        fixed_stream = self.fix_stream(input_stream)
+        
         # Make a VCF reader
-        reader = vcf.Reader(fsock=decompressed_stream,
+        reader = vcf.Reader(fsock=fixed_stream,
             strict_whitespace=True)
             
         self.rewrite_reader(reader, output_stream)

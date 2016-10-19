@@ -68,7 +68,7 @@ class TransparentUnzip(object):
         # See if we have a line to spit out
         newline_index = self.line_buffer.find("\n")
         
-        if newline_index == -1:
+        while newline_index == -1:
             # No line is in the buffer
             # Go get more data from the stream (in 16 k blocks)
             compressed = self.stream.read(16 * 2 ** 10)
@@ -134,32 +134,35 @@ class TransparentUnzip(object):
                     # We don't need to decompress at all
                     decompressed = compressed
             
+            # How many characters that we know aren't newlines do we have?
+            old_buffer_size = len(self.line_buffer)
+            
             # Stick it in the buffer
             self.line_buffer += decompressed
             
-            # Try again. TODO: may stack overflow if there aren't newlines ever
-            # and nobody gave us a max line length.
-            return self.readline(max_bytes)
+            # Try again to find a newline in the new material.
+            newline_index = self.line_buffer.find("\n", old_buffer_size)
         
-        else:
             
-            if max_bytes is not None:
-                # Adjust the newline index to return no more than max_bytes
-                # bytes. Since it's an included character in the line, we have
-                # to take 1 off of max_bytes.
-                newline_index = min(newline_index, max_bytes - 1)
+            
+        # OK now we have a newline found
+        if max_bytes is not None:
+            # Adjust the newline index to return no more than max_bytes
+            # bytes. Since it's an included character in the line, we have
+            # to take 1 off of max_bytes.
+            newline_index = min(newline_index, max_bytes - 1)
+    
+        # We have a line. Grab it.
+        line = self.line_buffer[0:newline_index + 1]
         
-            # We have a line. Grab it.
-            line = self.line_buffer[0:newline_index + 1]
-            
-            # Pop it off
-            self.line_buffer = self.line_buffer[newline_index + 1:]
-            
-            # Track the uncompressed bytes
-            self.uncompressed_bytes += len(line)
-            
-            # Return it
-            return line
+        # Pop it off
+        self.line_buffer = self.line_buffer[newline_index + 1:]
+        
+        # Track the uncompressed bytes
+        self.uncompressed_bytes += len(line)
+        
+        # Return it
+        return line
             
     def start_stats(self):
         """
