@@ -12,7 +12,7 @@ import urlparse
 # Get a submodule-global logger
 Logger = logging.getLogger("ftputil")
 
-class FTPOrFilesystemConnection:
+class FTPOrFilesystemConnection(object):
     """
     Represents a connection to an FTP server or to a directory on the local
     filesystem. When constructed from a root URL, allows listing of
@@ -162,7 +162,7 @@ def ftp_connect(url, retries=float("inf")):
             # Something went wrong doing the IO
             Logger.warning("Retry after FTP setup IO error: {}".format(e))
             
-class FakeFTP:
+class FakeFTP(object):
     """
     This fakes an FTP connection on a normal directory. You can connect to it
     and use robust_nlst on it and iterate over the filesystem and FTP with the

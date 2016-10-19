@@ -45,7 +45,8 @@ class TransparentUnzip(object):
         Function as an iterator over lines.
         """
         
-        line = self.readline
+        # Read a line
+        line = self.readline()
         
         if line == "":
             # No trailing newline only happens at the end of the file

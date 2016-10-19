@@ -7,7 +7,7 @@ import tsv
 
 Logger = logging.getLogger("plan")
 
-class ReferencePlan:
+class ReferencePlan(object):
     """
     Represents a plan to build a graph reference, or (Human) Genome Variation
     Map.

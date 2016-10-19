@@ -9,7 +9,7 @@ from .transparentunzip import TransparentUnzip
 
 Logger = logging.getLogger("plan")
 
-class VcfRewriter:
+class VcfRewriter(object):
     """
     Provides a class that rewrites VCFs according to a contig name translation
     table.
@@ -35,7 +35,7 @@ class VcfRewriter:
         decompressed_stream = TransparentUnzip(input_stream)
         
         # Make a VCF reader
-        reader = vcf.VcfReader(fsock=decompressed_stream,
+        reader = vcf.Reader(fsock=decompressed_stream,
             strict_whitespace=True)
             
         self.rewrite_reader(reader, output_stream)

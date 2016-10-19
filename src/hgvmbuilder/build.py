@@ -19,6 +19,7 @@ import os
 import os.path
 import sys
 
+import toil
 from toil.common import Toil
 from toil.job import Job
 from toil.realtimeLogger import RealtimeLogger
@@ -144,6 +145,8 @@ def main(args):
     
     # Set up logging
     logging.basicConfig(level=logging.INFO)
+    
+    logging.info("Running on Toil from {}".format(toil.__file__))
     
     # Start up Toil
     with Toil(options) as toil_instance:
