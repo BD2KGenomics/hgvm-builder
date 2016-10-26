@@ -13,3 +13,33 @@ The basic workflow will be:
 4. Align and merge in alt locus sequences, fix and novel patches and other full-length assemblies.
 
 5. Align, call, and integrate collections of short read data
+
+## Data Sources
+
+Data from a variety of sources will be combined to build the HGVM.
+
+### Sprint 1
+
+For the first pass, only two data sources will be incorporated.
+
+[ ]. The GRCh38 assembly, including alt loci and novel and fix patches.
+
+[ ]. The 1000 Genomes Project lifted-over VCFs
+
+### Subsequent Sprints
+
+Once the basic infrastructure for building a graph, the following data sources will be added.
+
+[ ]. The Simons Genome Diversity Project
+
+[ ]. The Aftican Genome Variation Project
+
+[ ]. The Personal Genome Project
+
+[ ]. Platinum Genomes
+
+[ ]. The Wash-U PacBia Assemblies
+
+
+
+
