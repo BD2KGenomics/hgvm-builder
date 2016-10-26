@@ -22,23 +22,23 @@ Data from a variety of sources will be combined to build the HGVM.
 
 For the first pass, only two data sources will be incorporated.
 
-[ ]. The GRCh38 assembly, including alt loci and novel and fix patches.
+- [ ] The GRCh38 assembly, including alt loci and novel and fix patches.
 
-[ ]. The 1000 Genomes Project lifted-over VCFs
+- [ ] The 1000 Genomes Project lifted-over VCFs
 
 ### Subsequent Sprints
 
 Once the basic infrastructure for building a graph, the following data sources will be added.
 
-[ ]. The Simons Genome Diversity Project
+- [ ] The Simons Genome Diversity Project
 
-[ ]. The Aftican Genome Variation Project
+- [ ] The Aftican Genome Variation Project
 
-[ ]. The Personal Genome Project
+- [ ] The Personal Genome Project
 
-[ ]. Platinum Genomes
+- [ ] Platinum Genomes
 
-[ ]. The Wash-U PacBia Assemblies
+- [ ] The Wash-U PacBia Assemblies
 
 
 
