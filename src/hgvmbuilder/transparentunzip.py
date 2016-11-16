@@ -1,6 +1,10 @@
 #hgvm-builder transparentunzip.py: Ungzip streams transparently if needed
 
+import logging
 import zlib
+
+# Get a submodule-global logger
+Logger = logging.getLogger("transparentunzip")
 
 class TransparentUnzip(object):
     """
@@ -67,6 +71,8 @@ class TransparentUnzip(object):
         compressed = self.stream.read(16 * 2 ** 10)
         self.compressed_bytes += len(compressed)
         
+        Logger.debug("Read {} bytes".format(len(compressed)))
+        
         if compressed == "":
             # We are out of data in the stream. But maybe there's more in
             # our decompressor?
@@ -88,12 +94,14 @@ class TransparentUnzip(object):
                 self.buffer += self.decompressor.decompress(compressed)
                 # We sucessfully found the headers we needed
                 self.header_read = True
+                Logger.debug("Is compressed")
             except zlib.error:
                 # Just skip decompressing; it's probably not actually
                 # compressed.
                 self.buffer += compressed
                 # We looked and didn't find a valid compressed header
                 self.header_read = False
+                Logger.debug("Is not compressed")
                 
         else:
             # We know if we should be compressed or not
@@ -141,7 +149,10 @@ class TransparentUnzip(object):
         # Remember the last character we could have checked
         checked = len(self.buffer)
         
-        while (newline_index == -1 and len(self.buffer) < max_bytes and
+        Logger.debug("{}, {}".format(newline_index, checked))
+        
+        while (newline_index == -1 and 
+            (max_bytes is None or len(self.buffer) < max_bytes) and
             self.buffer_chunk()):
             # While we haven't found a newline, we haven't gotten too many
             # bytes, and we still have data, keep looking for newlines in the
@@ -149,13 +160,17 @@ class TransparentUnzip(object):
             newline_index = self.buffer.find("\n", checked)
             checked = len(self.buffer)
             
+            Logger.debug("{}, {}".format(newline_index, checked))
+            
         if newline_index == -1:
             # Never found a newline
             if max_bytes is None:
                 # Read out the whole buffer
+                Logger.debug("Dump buffer")
                 return self.read(len(self.buffer))
             else:
                 # Read out the bytes we were asked for
+                Logger.debug("Hit limit")
                 return self.read(max_bytes)
         else:
             # If we found a newline, read out all the bytes through it

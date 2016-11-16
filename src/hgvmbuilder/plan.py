@@ -64,19 +64,29 @@ class ReferencePlan(object):
         self.alt_parents = {}
         # This dict maps primary scaffold accession.version to chromosome name,
         # if any.
-        self.primary_names = {}
+        self.accession_to_name = {}
+        # This does the reverse
+        self.name_to_accession = {}
         # This dict maps from chromosome name to a Toil file ID for the VCF for
         # that chromosome, if any.
         self.vcf_ids = {}
-        # This dict maps from chromosome name to a Toil file ID for the VCF
-        # index for that chromosome, if any.
-        self.vcf_index_ids = {}
-        # This list contains the Toil file store IDs for all the input possibly-
-        # gzipped FASTAs with primary scaffolds.
+        # This holds the list of raw, possibly compressed FASTA file IDs for
+        # FASTAs with primary sequences.
         self.primary_ids = []
-        # This list contains the Toil file store IDs for all the input possibly-
-        # gzipped FASTAs with alt scaffolds.
+        # This holds the list of raw, possibly compressed FASTA file IDs for
+        # FASTAs with alt sequences.
         self.alt_ids = []
+        
+        # This maps from primary scaffold name to file ID for its uncompressed
+        # FASTA. The FASTA may contain other sequences.
+        self.uncompressed_primary_fastas = {}
+        
+        # This maps from alt scaffold name to file ID for its uncompressed
+        # FASTA. The FASTA may contain other sequences.
+        self.uncompressed_primary_fastas = {}
+        
+        # This maps from VCF or FASTA file ID to index (.tbi or .fai) file ID
+        self.index_ids = {}
         
         # We're going to have to split the primary FASTAs up and shuffle them to
         # be with the right alt FASTA sequences and VCFs. But we'll do that
@@ -170,15 +180,33 @@ class ReferencePlan(object):
         
         raise NotImplementedError
         
-    def get_name_translation(self):
+    def chromosome_name_to_accession(self, chromosome_name):
         """
-        Return a dict from chromosome name (like "1") to accession.version (like
-        "ABC123.2").
+        Given a chromosome name, return the corresponding accession for the
+        primary contig.
         """
+        # Return the changed name, or the unmodified value if there's no mapping
+        return self.name_to_accession.get(chromosome_name, chromosome_name)
         
-        # Basically just need to reverse the dict we are storing
-        return {name: accession for accession, name
-            in self.primary_names.iteritems()}
+    def accession_to_chromosome_name(self, accession):
+        """
+        Given an accession, return the chromosome name if any is associated, or
+        the accession otherwise.
+        """
+        # Return the changed name, or the unmodified value if there's no mapping
+        return self.accession_to_name.get(accession, accession)
+
+    def for_each_primary_fasta_id(self):
+        """
+        Iterate over primary input FASTA IDs.
+        """
+        return self.primary_ids
+        
+    def for_each_alt_fasta_id(self):
+        """
+        Iterate over alt input FASTA IDs.
+        """
+        return self.alt_ids 
             
     def for_each_vcf_id_by_chromosome(self):
         """
@@ -202,27 +230,13 @@ class ReferencePlan(object):
         
         return self.vcf_ids[chrom_name]
         
-    def get_vcf_index_id(self, chrom_name):
+    def get_index_id(self, file_id):
         """
-        Get the VCF index file ID for the given chromosome name. Throws an error
-        if it can't be found.
-        """
-        
-        return self.vcf_index_ids[chrom_name]
-        
-    def for_each_primary_fasta(self):
-        """
-        Iterate through primary FASTA file IDs.
+        Given a VCF or FASTA file ID, gets the file ID for the index for that
+        file.
         """
         
-        return self.primary_ids
-        
-    def for_each_alt_fasta(self):
-        """
-        Iterate through alt FASTA file IDs.
-        """
-        
-        return self.alt_ids
+        return self.index_ids[file_id]
         
     def bake(self, import_function):
         """
@@ -285,17 +299,19 @@ class ReferencePlan(object):
             imported_id = import_function(vcf_index_url)
             Logger.info("Imported index {} as {}".format(vcf_index_url,
                 imported_id))
-            self.vcf_index_ids[chrom_name] = imported_id
+            # Remember that this is the index for that VCF
+            self.index_ids[self.vcf_ids[chrom_name]] = imported_id
         
         
-    def set_primary_name(self, accession, name):
+    def set_chromosome_name(self, accession, name):
         """
         Set the chromosome name for a primary scaffold. Takes the
         accession.version string (like "LOL1234.1") and the chromosome name
         string (like "1" or "MT").
         """
 
-        self.primary_names[accession] = name
+        self.accession_to_name[accession] = name
+        self.name_to_accession[name] = accession
         
     def set_alt_parent(self, alt_accession, parent_accession):
         """
@@ -320,7 +336,7 @@ class ReferencePlan(object):
         
         for name, accession in reader:
             # Apply each name/accession mapping
-            self.set_primary_name(accession, name)
+            self.set_chromosome_name(accession, name)
             
     def parse_placement_stream(self, stream):
         """

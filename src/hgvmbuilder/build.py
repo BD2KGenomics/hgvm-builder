@@ -17,10 +17,10 @@ import argparse
 import logging
 import os
 import os.path
-import sys
-import subprocess
-import gzip
+import re
 import shutil
+import subprocess
+import sys
 
 import toil
 from toil.common import Toil
@@ -91,33 +91,103 @@ def create_plan(assembly_url, vcfs_url):
     # Return the completed plan
     return plan
     
+def prepare_fasta(job, fasta_id):
+    """
+    Given a job and a FASTA ID in its file store, download, decompress, scan,
+    index, and re-upload the FASTA.
+    
+    Returns a tuple of the uncompressed FASTA file ID, the index file ID, and
+    the list of accessions in the FASTA.
+    
+    Could be a Toil job, but intended to be called as a function.
+    """
+    
+    # Remember the contig names
+    accessions = []
+    
+    RealtimeLogger.info("Preparing FASTA {}".format(fasta_id))
+    
+    # For each FASTA, drop it on disk somewhere
+    filename = os.path.join(job.fileStore.getLocalTempDir(), "fasta.fa")
+    with open(filename, "w") as out_handle:
+        with job.fileStore.readGlobalFileStream(fasta_id) as in_handle:
+            # Read from the file store, uncompress if needed, and write to disk.
+            shutil.copyfileobj(TransparentUnzip(in_handle), out_handle)
+         
+    # Now index it
+    subprocess.check_call(["samtools", "faidx", filename])   
+    
+    with open(filename + ".fai") as index_file:
+        for line in index_file:
+            # Crib the contig presence info from the index.
+            accession = line.split("\t")[0]
+            accessions.append(accession)
+            RealtimeLogger.info("Found contig {}".format(accession))
+    
+    # Upload and return
+    return (job.fileStore.writeGlobalFile(filename),
+        job.fileStore.writeGlobalFile(filename + ".fai"), accessions)
+    
+    
+    
 def main_job(job, options, plan):
     """
     Root Toil job. Execute the plan. Returns a list of graph file IDs to export.
     """
 
-    # Make sure we have the Toil IDs for all the top-level chromosome FASTAs.
-    fasta_ids = list(plan.for_each_primary_fasta())
+    # This maps from primary accession to uncompressed fasta ID and index ID.
+    primary_to_fasta = {}
     
-    # Grab the VCF names and file IDs
-    vcf_ids = dict(plan.for_each_vcf_id_by_chromosome())
+    # This maps from alt accession to uncompressed fasta ID and index ID.
+    alt_to_fasta = {}
     
+    for fasta_id in plan.for_each_primary_fasta_id():
+        # Prepare all the primary FASTAs
+        uncompressed_id, index_id, contigs = prepare_fasta(job, fasta_id)
+        for contig in contigs:
+            # Every contig found in that FASTA points to the uncompressed FASTA
+            # and its index.
+            primary_to_fasta[contig] = (uncompressed_id, index_id)
+            
+    for fasta_id in plan.for_each_alt_fasta_id():
+        # Prepare all the alt FASTAs
+        uncompressed_id, index_id, contigs = prepare_fasta(job, fasta_id)
+        for contig in contigs:
+            # Every contig found in that FASTA points to the uncompressed FASTA
+            # and its index.
+            alt_to_fasta[contig] = (uncompressed_id, index_id)
+           
+    # Grab the dict of VCF IDs by chromosome names
+    # TODO: stop converting back and forth
+    vcf_ids_by_chromosome = dict(plan.for_each_vcf_id_by_chromosome())
+            
     # Build a list of VG graph promises
     contig_graph_ids = []
     
-    RealtimeLogger.info("Building graph from {} primary FASTAs and {} "
-        "VCFs".format(len(fasta_ids), len(vcf_ids)))
-    
-    # Build in parallel for each chromosome
-    for chromosome_name, vcf_id in vcf_ids.iteritems():
-        # For each chromosome and its VCF
+    RealtimeLogger.info("Building graph from {} primary contigs and {} "
+        "VCFs".format(len(primary_to_fasta), len(vcf_ids_by_chromosome)))
+            
+    for (accession, (fasta_id, fasta_index_id)) in primary_to_fasta.iteritems():
+        # For each primary accession, grab its FASTA ID and index ID
         
-        # Make a job to build a graph with that VCF and the relevant FASTA
+        # Get the chromosome name (or just the accession again if it doesn't
+        # have one)
+        chromosome_name = plan.accession_to_chromosome_name(accession)
         
-        # TODO: for now we'll just globally replicate the FASTAs and let
-        # cacheing sort it out. The reference isn't that big...
+        # Grab its VCF ID and VCF index ID, if any
+        vcf_id = None
+        vcf_index_id = None
+        
+        if vcf_ids_by_chromosome.has_key(chromosome_name):
+            # We catually have these files
+            vcf_id = vcf_ids_by_chromosome[chromosome_name]
+            vcf_index_id = plan.get_index_id(vcf_id)
+        
+        # Dispatch a child to build it with those four files and the contig name
+        # (or accession if there is no contig name).
         child = job.addChildJobFn(make_chromosome_graph_job, options, plan,
-            chromosome_name, cores="1", memory="10G", disk="50G")
+            chromosome_name, fasta_id, fasta_index_id, vcf_id, vcf_index_id,
+            cores="1", memory="10G", disk="50G")
             
         contig_graph_ids.append(child.rv())
         
@@ -126,60 +196,39 @@ def main_job(job, options, plan):
         
             
             
-def make_chromosome_graph_job(job, options, plan, chromosome_name):
+def make_chromosome_graph_job(job, options, plan, chromosome_name, fasta_id,
+    fasta_index_id, vcf_id, vcf_index_id):
     """
-    Download the VCF and FASTAs for the given chromosome from the Toil job
-    store, and use vg to make a graph for the contig with the given name in VCF
-    space. Resulting graph will have contigs named in FASTA accession.version
+    Download the FASTA and its index, and the VCF and its index if given, and
+    use vg to make a graph for the contig with the given name in VCF space.
+    Resulting graph will have contigs named in FASTA accession.version
     namespace.
     
     """
     
-    # Find the VCF and index
-    vcf_id = plan.get_vcf_id(chromosome_name)
-    vcf_index_id = plan.get_vcf_index_id(chromosome_name)
-    
-    # Download them
-    vcf_filename = os.path.join(job.fileStore.getLocalTempDir(), "vcf.vcf.gz")
-    job.fileStore.readGlobalFile(vcf_id, vcf_filename)
-    vcf_index_filename = vcf_filename + ".tbi"
-    job.fileStore.readGlobalFile(vcf_index_id, vcf_index_filename)
-    
-    # Find the FASTAs
-    fasta_ids = list(plan.for_each_primary_fasta())
-    
-    # Download the FASTAs
-    fasta_filenames = []
-    
-    # FASTA files need to be unzipped
-    for i, fasta_id in enumerate(fasta_ids):
-        # Decide where to put the uncompressed FASTA.
-        # Make sure it's in a place where we can put the index next to it
-        fasta_filename = os.path.join(job.fileStore.getLocalTempDir(),
-            "fasta{}.fa".format(i))
-        RealtimeLogger.info("Downloading FASTA {}...".format(i))
-        with job.fileStore.readGlobalFileStream(fasta_id) as compressed_stream:
-            # Decompress each FASTA, if necessary
-            decompressed = TransparentUnzip(compressed_stream)
-            shutil.copyfileobj(decompressed, open(fasta_filename, "w"))
-        
-        fasta_filenames.append(fasta_filename)
-
     # Compose some VG arguments. We want to build just this one contig.
-    vg_args = ["construct", "--region", chromosome_name, "--region-is-chrom",
-        "--vcf", vcf_filename]
+    vg_args = ["construct", "--region", chromosome_name, "--region-is-chrom"]
     
-    for vcf_contig, fasta_contig in plan.get_name_translation().iteritems():
-        # Add translations for all contig names.
-        # TODO: Maybe we can just get by with our one, if present?
-        # TODO: how do we know "=" isn't used in the names???
-        vg_args += ["--rename", "{}={}".format(vcf_contig, fasta_contig)]
-    
-    for fasta_filename in fasta_filenames:
-        # Add all the FASTAs. TODO: is vg going to explode if multiple VGs try
-        # and index the FASTAs at once? And can it handle gzipped FASTAs?
-        vg_args += ["--reference", fasta_filename]
-    
+    if vcf_id is not None:
+        # We have a VCF and an index. Download them.
+        vcf_filename = os.path.join(job.fileStore.getLocalTempDir(), "vcf.vcf.gz")
+        job.fileStore.readGlobalFile(vcf_id, vcf_filename)
+        vcf_index_filename = vcf_filename + ".tbi"
+        job.fileStore.readGlobalFile(vcf_index_id, vcf_index_filename)
+        
+        vg_args += ["--vcf", vcf_filename]
+        
+    # Download the FASTA and FASTA index
+    fasta_filename = os.path.join(job.fileStore.getLocalTempDir(), "fasta.fa")
+    job.fileStore.readGlobalFile(fasta_id, fasta_filename)
+    fasta_index_filename = fasta_filename + ".fai"
+    job.fileStore.readGlobalFile(fasta_index_id, fasta_index_filename)
+    vg_args += ["--reference", fasta_filename]
+
+    # Add the necessary rename for this chromosome to its accession
+    vg_args += ["--rename", "{}={}".format(chromosome_name,
+        plan.chromosome_name_to_accession(chromosome_name))]
+
     # Where will we put the graph?    
     graph_filename = job.fileStore.getLocalTempFile()
     
@@ -203,6 +252,13 @@ def main(args):
     
     # Set up logging
     logging.basicConfig(level=logging.INFO)
+    
+    # Make sure VG is available
+    subprocess.check_call(["vg", "version"])
+    
+    # And samtools
+    # TODO: use vg to index FASTAs once, somehow.
+    subprocess.check_call(["samtools", "--version"])
     
     logging.info("Running on Toil from {}".format(toil.__file__))
     
