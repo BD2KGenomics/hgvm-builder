@@ -52,6 +52,9 @@ class ReferencePlan(object):
         self.alt_placement_urls = []
         # This holds a dict from chromosome name/number to relevant VCF URL.
         self.vcf_urls = {}
+        # This holds a dict from chromosome name/number to relevant VCF index
+        # URL.
+        self.vcf_index_urls = {}
         
         # After we load all the databases and import all the input files into
         # Toil, we populate these fields.
@@ -65,6 +68,9 @@ class ReferencePlan(object):
         # This dict maps from chromosome name to a Toil file ID for the VCF for
         # that chromosome, if any.
         self.vcf_ids = {}
+        # This dict maps from chromosome name to a Toil file ID for the VCF
+        # index for that chromosome, if any.
+        self.vcf_index_ids = {}
         # This list contains the Toil file store IDs for all the input possibly-
         # gzipped FASTAs with primary scaffolds.
         self.primary_ids = []
@@ -138,6 +144,22 @@ class ReferencePlan(object):
                 
         self.vcf_urls[chromosome_name] = url
         
+    def add_variants_index(self, chromosome_name, url): 
+        """
+        Adds the .tbi index at the given URL as the index of variants to be
+        applied to the given chromosome number or X/Y/MT name. Only one index is
+        allowed per chromosome. The index may be added before or after the VCF
+        itself.
+        """
+        
+        if self.vcf_index_urls.has_key(chromosome_name):
+            # We already have an index for this chromosome
+            raise RuntimeError(
+                "Duplicate chromosome name {} adding index {} to plan".format(
+                chromosome_name, url))
+                
+        self.vcf_index_urls[chromosome_name] = url
+        
     def add_sample(self, fastq_url):
         """
         Adds the given high coverage sample FASTQ as a sample to be aligned to
@@ -164,6 +186,29 @@ class ReferencePlan(object):
         """
         
         return self.vcf_ids.iteritems()
+        
+    def for_each_chromosome(self):
+        """
+        Iterate through chromosome names that have associated VCFs.
+        """
+        
+        return self.vcf_ids.iterkeys()
+        
+    def get_vcf_id(self, chrom_name):
+        """
+        Get the VCF file ID for the given chromosome name. Throws an error
+        if it can't be found.
+        """
+        
+        return self.vcf_ids[chrom_name]
+        
+    def get_vcf_index_id(self, chrom_name):
+        """
+        Get the VCF index file ID for the given chromosome name. Throws an error
+        if it can't be found.
+        """
+        
+        return self.vcf_index_ids[chrom_name]
         
     def for_each_primary_fasta(self):
         """
@@ -208,20 +253,39 @@ class ReferencePlan(object):
         for primary_url in self.primary_fasta_urls:
             # Import all the primary FASTAs
             imported_id = import_function(primary_url)
-            Logger.info("Imported primary {} as {}".format(primary_url, imported_id))
+            Logger.info("Imported primary {} as {}".format(primary_url,
+                imported_id))
             self.primary_ids.append(imported_id)
             
         for alt_url in self.alt_fasta_urls:
             # Import all the alt FASTAs
             imported_id = import_function(alt_url)
-            Logger.info("Imported alt {} as {}".format(alt_url, imported_id))
+            Logger.info("Imported alt {} as {}".format(alt_url,
+                imported_id))
             self.alt_ids.append(imported_id)
             
         for chrom_name, vcf_url in self.vcf_urls.iteritems():
             # Import all the VCFs
+            
+            if not self.vcf_index_urls.has_key(chrom_name):
+                raise RuntimeError("VCF but no index found for {}".format(
+                    chrom_name))
+            
             imported_id = import_function(vcf_url)
             Logger.info("Imported VCF {} as {}".format(vcf_url, imported_id))
             self.vcf_ids[chrom_name] = imported_id
+            
+        for chrom_name, vcf_index_url in self.vcf_index_urls.iteritems():
+            # Import all the VCF indexes
+            
+            if not self.vcf_urls.has_key(chrom_name):
+                raise RuntimeError("Index but no VCF found for {}".format(
+                    chrom_name))
+            
+            imported_id = import_function(vcf_index_url)
+            Logger.info("Imported index {} as {}".format(vcf_index_url,
+                imported_id))
+            self.vcf_index_ids[chrom_name] = imported_id
         
         
     def set_primary_name(self, accession, name):

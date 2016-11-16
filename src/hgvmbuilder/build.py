@@ -19,6 +19,8 @@ import os
 import os.path
 import sys
 import subprocess
+import gzip
+import shutil
 
 import toil
 from toil.common import Toil
@@ -28,6 +30,7 @@ from toil.realtimeLogger import RealtimeLogger
 from .plan import ReferencePlan
 from . import grcparser
 from . import thousandgenomesparser
+from .transparentunzip import TransparentUnzip
 
 # Get a submodule-global logger
 Logger = logging.getLogger("build")
@@ -114,8 +117,7 @@ def main_job(job, options, plan):
         # TODO: for now we'll just globally replicate the FASTAs and let
         # cacheing sort it out. The reference isn't that big...
         child = job.addChildJobFn(make_chromosome_graph_job, options, plan,
-            chromosome_name, vcf_id, fasta_ids,
-            cores="1", memory="10G", disk="50G")
+            chromosome_name, cores="1", memory="10G", disk="50G")
             
         contig_graph_ids.append(child.rv())
         
@@ -124,18 +126,45 @@ def main_job(job, options, plan):
         
             
             
-def make_chromosome_graph_job(job, options, plan, chromosome_name, vcf_id,
-    fasta_ids):
+def make_chromosome_graph_job(job, options, plan, chromosome_name):
     """
-    Download the given VCF and FASTAs from the Toil job store, and use vg to
-    make a graph for the contig with the given name in VCF space. Resulting
-    graph will have contigs named in FASTA accession.version namespace.
+    Download the VCF and FASTAs for the given chromosome from the Toil job
+    store, and use vg to make a graph for the contig with the given name in VCF
+    space. Resulting graph will have contigs named in FASTA accession.version
+    namespace.
+    
     """
     
-    # Download the files
-    vcf_filename = job.fileStore.readGlobalFile(vcf_id)
-    fasta_filenames = [job.fileStore.readGlobalFile(i) for i in fasta_ids]
+    # Find the VCF and index
+    vcf_id = plan.get_vcf_id(chromosome_name)
+    vcf_index_id = plan.get_vcf_index_id(chromosome_name)
     
+    # Download them
+    vcf_filename = os.path.join(job.fileStore.getLocalTempDir(), "vcf.vcf.gz")
+    job.fileStore.readGlobalFile(vcf_id, vcf_filename)
+    vcf_index_filename = vcf_filename + ".tbi"
+    job.fileStore.readGlobalFile(vcf_index_id, vcf_index_filename)
+    
+    # Find the FASTAs
+    fasta_ids = list(plan.for_each_primary_fasta())
+    
+    # Download the FASTAs
+    fasta_filenames = []
+    
+    # FASTA files need to be unzipped
+    for i, fasta_id in enumerate(fasta_ids):
+        # Decide where to put the uncompressed FASTA.
+        # Make sure it's in a place where we can put the index next to it
+        fasta_filename = os.path.join(job.fileStore.getLocalTempDir(),
+            "fasta{}.fa".format(i))
+        RealtimeLogger.info("Downloading FASTA {}...".format(i))
+        with job.fileStore.readGlobalFileStream(fasta_id) as compressed_stream:
+            # Decompress each FASTA, if necessary
+            decompressed = TransparentUnzip(compressed_stream)
+            shutil.copyfileobj(decompressed, open(fasta_filename, "w"))
+        
+        fasta_filenames.append(fasta_filename)
+
     # Compose some VG arguments. We want to build just this one contig.
     vg_args = ["construct", "--region", chromosome_name, "--region-is-chrom",
         "--vcf", vcf_filename]
@@ -181,8 +210,8 @@ def main(args):
     with Toil(options) as toil_instance:
         
         if toil_instance.options.restart:
-            # We're re-running
-            toil_instance.restart()
+            # We're re-running. Grab the root job return value from restart
+            graph_ids = toil_instance.restart()
         else:
             # Run from the top
         
@@ -200,9 +229,9 @@ def main(args):
             # Run the root job
             graph_ids = toil_instance.start(root_job)
         
-            for i, graph_id in enumerate(graph_ids):
-                # Export all the graphs as VG files in arbitrary order
-                toil.exportFile(graph_id, "file://part{}.vg".format(i))
+        for i, graph_id in enumerate(graph_ids):
+            # Export all the graphs as VG files in arbitrary order
+            toil_instance.exportFile(graph_id, "file:./part{}.vg".format(i))
         
     print("Toil workflow complete")
     return 0

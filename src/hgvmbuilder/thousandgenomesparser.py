@@ -12,7 +12,7 @@ def parse(plan, vcf_root):
     """
     Given a plan.ReferencePlan to fill in and a URL to a directory of VCFs like 
     http://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20130502/supporting/GRCh38
-    _positions, list all the VCFs and add them to the plan.
+    _positions, list all the VCFs and indexes, and add them to the plan.
     
     Assumes that each VCF has "chr[0-9A-Za-z]+" somewhere in its name,
     identifying the chromosome it belongs to.
@@ -28,8 +28,11 @@ def parse(plan, vcf_root):
     for item in connection.list_children(""):
         # For each file that might be a VCF
         
-        if (not item.endswith(".vcf")) and (not item.endswith(".vcf.gz")):
-            # Not a VCF
+        # TODO: for now we only take gzipped VCFs, because VG requires VCFs to
+        # be indexed, and we have no indexing code.
+        if ((not item.endswith(".vcf.gz")) and
+            (not item.endswith(".vcf.gz.tbi"))):
+            # Not a VCF or index
             continue
             
         # Find a match for the chromosome name pattern, if any exists            
@@ -38,7 +41,16 @@ def parse(plan, vcf_root):
             # We found one. Pull out the chromosome name without chr
             name = match.group(1)
             
-            Logger.info("Chromosome {} VCF: {}".format(name, item))
-            
-            # Add the VCF to the plan
-            plan.add_variants(name, connection.get_url(item))
+            if item.endswith(".vcf.gz.tbi"):
+                # It's an index
+                Logger.info("Chromosome {} index: {}".format(name, item))
+                
+                # Add the VCF to the plan
+                plan.add_variants_index(name, connection.get_url(item))
+                
+            else:
+                # It's a VCF
+                Logger.info("Chromosome {} VCF: {}".format(name, item))
+                
+                # Add the VCF to the plan
+                plan.add_variants(name, connection.get_url(item))

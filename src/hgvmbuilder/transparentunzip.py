@@ -28,11 +28,84 @@ class TransparentUnzip(object):
         self.header_read = None
         
         # We need to do lines ourselves, so we need to keep a buffer
-        self.line_buffer = ""
+        self.buffer = ""
         
         # Track out throughput
         self.compressed_bytes = 0
         self.uncompressed_bytes = 0
+        
+    def read(self, size):
+        """
+        Read size or fewer uncompressed bytes. All uncompressed bytes must flow
+        out through this function.
+        
+        """
+        
+        while size > len(self.buffer) and self.buffer_chunk():
+            # Loop until we have enough bytes or run out of input
+            pass
+        
+        # Now we have enough bytes in the buffer, or at least as many as we are
+        # going to get.
+        
+        # Pull off the bytes we were asked for
+        part = self.buffer[0:size]
+        # Leave the rest
+        self.buffer = self.buffer[size:]
+        
+        self.uncompressed_bytes += len(part)
+        
+        return part
+            
+    def buffer_chunk(self):
+        """
+        Try to add data to the buffer. Returns true if data could be read, and
+        false if there is no more data.
+        """
+        
+        # Try reading form the stream
+        compressed = self.stream.read(16 * 2 ** 10)
+        self.compressed_bytes += len(compressed)
+        
+        if compressed == "":
+            # We are out of data in the stream. But maybe there's more in
+            # our decompressor?
+            
+            if self.decompressor is not None and self.header_read:
+                # No more input data, but we did sucessfully start
+                # decompressing. Flush out the output data.
+                self.buffer += self.decompressor.flush()
+                self.decompressor = None
+                return True
+            else:
+                # Otherwise there's just no more data
+                return False
+        
+        # If we didn't break, we got some data from the stream.
+        if self.header_read is None:
+            # Try decompressing the first block
+            try:
+                self.buffer += self.decompressor.decompress(compressed)
+                # We sucessfully found the headers we needed
+                self.header_read = True
+            except zlib.error:
+                # Just skip decompressing; it's probably not actually
+                # compressed.
+                self.buffer += compressed
+                # We looked and didn't find a valid compressed header
+                self.header_read = False
+                
+        else:
+            # We know if we should be compressed or not
+            if self.header_read:
+                # We do need to decompress
+                self.buffer += self.decompressor.decompress(compressed)
+            else:
+                # We don't need to decompress at all
+                self.buffer += compressed
+                
+        # If we didn't EOF, we added something to the buffer.
+        return True
         
     def __iter__(self):
         """
@@ -61,108 +134,32 @@ class TransparentUnzip(object):
         
         Won't return more than max_bytes bytes.
         
-        Doesn't support the size limiting argument that file objects generally
-        support.
         """
         
         # See if we have a line to spit out
-        newline_index = self.line_buffer.find("\n")
+        newline_index = self.buffer.find("\n")
+        # Remember the last character we could have checked
+        checked = len(self.buffer)
         
-        while newline_index == -1:
-            # No line is in the buffer
-            # Go get more data from the stream (in 16 k blocks)
-            compressed = self.stream.read(16 * 2 ** 10)
+        while (newline_index == -1 and len(self.buffer) < max_bytes and
+            self.buffer_chunk()):
+            # While we haven't found a newline, we haven't gotten too many
+            # bytes, and we still have data, keep looking for newlines in the
+            # new data.
+            newline_index = self.buffer.find("\n", checked)
+            checked = len(self.buffer)
             
-            # Track the amount read
-            self.compressed_bytes += len(compressed)
-            
-            if compressed == "":
-                if self.decompressor is not None and self.header_read:
-                    # No more input data, but we did sucessfully start
-                    # decompressing. Flush out the output data.
-                    self.line_buffer += self.decompressor.flush()
-                    self.decompressor = None
-                    # Spit out a line from that
-                    return self.readline()
-                
-                # We didn't find a newline, and there's no more data, and
-                # nothing to flush.
-                
-                if len(self.line_buffer) < max_bytes:
-                    # We can fill the max requested bytes and have some left
-                    # over
-                    
-                    # Pull out the max bytes wanted as the "line"
-                    line = self.line_buffer[0:max_bytes]
-                    
-                    # Make the rest be in the buffer still
-                    self.line_buffer = self.line_buffer[max_bytes:]
-                    
-                else:
-                    # They want our whole buffer
-                    # Take what we have (with no trailing \n added)
-                    line = self.line_buffer
-                    # Clear the buffer so next time we return "" as desired.
-                    self.line_buffer = ""
-                
-                # Track the uncompressed bytes
-                self.uncompressed_bytes += len(line)
-                
-                return line
-                
-            # Otherwise we found more data
-            
-            if self.header_read is None:
-                # Try decompressing the first block
-                try:
-                    decompressed = self.decompressor.decompress(compressed)
-                    # We sucessfully found the headers we needed
-                    self.header_read = True
-                except zlib.error:
-                    # Just skip decompressing; it's probably not actually
-                    # compressed.
-                    decompressed = compressed
-                    # We looked and didn't find a valid compressed header
-                    self.header_read = False
-                    
+        if newline_index == -1:
+            # Never found a newline
+            if max_bytes is None:
+                # Read out the whole buffer
+                return self.read(len(self.buffer))
             else:
-                # We know if we should be compressed or not
-                if self.header_read:
-                    # We do need to decompress
-                    decompressed = self.decompressor.decompress(compressed)
-                else:
-                    # We don't need to decompress at all
-                    decompressed = compressed
-            
-            # How many characters that we know aren't newlines do we have?
-            old_buffer_size = len(self.line_buffer)
-            
-            # Stick it in the buffer
-            self.line_buffer += decompressed
-            
-            # Try again to find a newline in the new material.
-            newline_index = self.line_buffer.find("\n", old_buffer_size)
-        
-            
-            
-        # OK now we have a newline found
-        if max_bytes is not None:
-            # Adjust the newline index to return no more than max_bytes
-            # bytes. Since it's an included character in the line, we have
-            # to take 1 off of max_bytes.
-            newline_index = min(newline_index, max_bytes - 1)
-    
-        # We have a line. Grab it.
-        line = self.line_buffer[0:newline_index + 1]
-        
-        # Pop it off
-        self.line_buffer = self.line_buffer[newline_index + 1:]
-        
-        # Track the uncompressed bytes
-        self.uncompressed_bytes += len(line)
-        
-        # Return it
-        return line
+                # Read out the bytes we were asked for
+                return self.read(max_bytes)
+        else:
+            # If we found a newline, read out all the bytes through it
+            return self.read(newline_index + 1)
             
     def start_stats(self):
         """
