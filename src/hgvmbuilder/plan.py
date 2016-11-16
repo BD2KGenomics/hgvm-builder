@@ -165,6 +165,20 @@ class ReferencePlan(object):
         
         return self.vcf_ids.iteritems()
         
+    def for_each_primary_fasta(self):
+        """
+        Iterate through primary FASTA file IDs.
+        """
+        
+        return self.primary_ids
+        
+    def for_each_alt_fasta(self):
+        """
+        Iterate through alt FASTA file IDs.
+        """
+        
+        return self.alt_ids
+        
     def bake(self, import_function):
         """
         "Bake" the plan by downloading metadata and importing data files into a
