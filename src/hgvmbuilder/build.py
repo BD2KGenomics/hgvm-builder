@@ -99,7 +99,7 @@ def prepare_fasta(job, fasta_id):
     Returns a tuple of the uncompressed FASTA file ID, the index file ID, and
     the list of accessions in the FASTA.
     
-    Could be a Toil job, but intended to be called as a function.
+    Could be a Toil job or a function.
     """
     
     # Remember the contig names
@@ -134,24 +134,68 @@ def main_job(job, options, plan):
     """
     Root Toil job. Execute the plan. Returns a list of graph file IDs to export.
     """
+    
+    # This holds uncompressed FASTA ID, index ID, and contig list tuples from
+    # prepared primary FASTAs
+    prepared_primary = []
+    # And this holds the same things for alt FASTAs
+    prepared_alt = []
+    
+    # This holds child jobs that process FASTAs
+    fasta_children = []
+    
+    for fasta_id in plan.for_each_primary_fasta_id():
+        # Prepare each primary FASTA
+        child = job.addChildJobFn(prepare_fasta, fasta_id,
+            cores="1", memory="4G", disk="5G")
+        fasta_children.append(child)
+        prepared_primary.append(child.rv())
+        
+    
+    for fasta_id in plan.for_each_alt_fasta_id():
+        # Prepare each alt FASTA
+        child = job.addChildJobFn(prepare_fasta, fasta_id,
+            cores="1", memory="4G", disk="5G")
+        fasta_children.append(child)
+        prepared_alt.append(child.rv())
+            
+    # Add a child that will use those FASTAs, and return what it returns
+    last_child = job.addChildJobFn(find_fastas_and_run_builds_job, options,
+        plan, prepared_primary, prepared_alt, cores="1", memory="4G", disk="1G")
+        
+    for child in fasta_children:
+        # Make sure all the other children are done before this last one can
+        # start
+        child.addFollowOn(last_child)
+    
+    # Return what that last child returns
+    return last_child.rv()
+    
 
+
+def find_fastas_and_run_builds_job(job, options, plan, prepared_primary, prepared_alt):
+    """
+    Given the list of results from preparing all the primary FASTAs, and the
+    list of results from preparing all the alt FASTAs, run the graph build.
+    Returns a list of file IDs for vg graphs to export.
+    """
+    
     # This maps from primary accession to uncompressed fasta ID and index ID.
     primary_to_fasta = {}
     
     # This maps from alt accession to uncompressed fasta ID and index ID.
     alt_to_fasta = {}
     
-    for fasta_id in plan.for_each_primary_fasta_id():
-        # Prepare all the primary FASTAs
-        uncompressed_id, index_id, contigs = prepare_fasta(job, fasta_id)
+    for uncompressed_id, index_id, contigs in prepared_primary:
+        # Look at all the prepared primary FASTAs
         for contig in contigs:
             # Every contig found in that FASTA points to the uncompressed FASTA
             # and its index.
             primary_to_fasta[contig] = (uncompressed_id, index_id)
             
-    for fasta_id in plan.for_each_alt_fasta_id():
-        # Prepare all the alt FASTAs
-        uncompressed_id, index_id, contigs = prepare_fasta(job, fasta_id)
+    
+    for uncompressed_id, index_id, contigs in prepared_alt:
+        # Look at all the prepared alt FASTAs
         for contig in contigs:
             # Every contig found in that FASTA points to the uncompressed FASTA
             # and its index.
