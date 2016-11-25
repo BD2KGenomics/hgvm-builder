@@ -324,6 +324,23 @@ class ReferencePlan(object):
 
         self.alt_parents[alt_accession] = parent_accession
         
+    def get_children(self, parent_accession):
+        """
+        Iterate through the list of accession.version strings of child alt
+        contigs on the given parent, identifird by accession.version.
+        """
+        
+        # We'll build a list of the children of this parent
+        to_return = []
+        
+        # TODO: reverse this so we have efficient access in this direction.
+        for child, parent in self.alt_parents.iteritems():
+            if parent == parent_accession:
+                # This is a child of that parent
+                to_return.append(child)
+        
+        return to_return
+        
     def parse_name_stream(self, stream):
         """
         Parse GRC chr2acc format (TSV of name and accession.version) on the

@@ -229,16 +229,18 @@ def find_fastas_and_run_builds_job(job, options, plan, prepared_primary, prepare
         
         # Dispatch a child to build it with those four files and the contig name
         # (or accession if there is no contig name).
-        child = job.addChildJobFn(make_chromosome_graph_job, options, plan,
+        base_job = job.addChildJobFn(make_chromosome_graph_job, options, plan,
             chromosome_name, fasta_id, fasta_index_id, vcf_id, vcf_index_id,
             cores="1", memory="10G", disk="50G")
             
-        contig_graph_ids.append(child.rv())
+        # And another child to augment the graph with alts with vg msga
+        msga_job = base_job.addFollowOnJobFn(align_alts_job, options, plan,
+            base_job.rv(), chromosome_name, alt_to_fasta,
+            cores="1", memory="50G", disk="50G")
+            
+        contig_graph_ids.append(msga_job.rv())
         
     return contig_graph_ids
-            
-        
-            
             
 def make_chromosome_graph_job(job, options, plan, chromosome_name, fasta_id,
     fasta_index_id, vcf_id, vcf_index_id):
@@ -284,6 +286,62 @@ def make_chromosome_graph_job(job, options, plan, chromosome_name, fasta_id,
     
     # Upload the graph
     return job.fileStore.writeGlobalFile(graph_filename)
+    
+def align_alts_job(job, options, plan, vg_id, chromosome_name, alt_to_fasta):
+    """
+    Download the given VG graph for a single chromosome, and align all the alts
+    for that chromosome progressively to it.        
+    
+    Takes a dict from alt contig accession to FASTA and index file IDs (which
+    may repeat).
+    
+    Returns the ID of the new graph.
+    """
+    
+    # Collect the alt contig names that are on this chromosome
+    alt_contigs = plan.get_children(plan.chromosome_name_to_accession(
+        chromosome_name))
+    
+    # Make a set of FASTA, index pairs we will need to download
+    to_download = set()
+    
+    for contig in alt_contigs:
+        # Figure out what FASTA we need to find this contig in
+        fasta_id, index_id = alt_to_fasta[contig]
+        # Remember to get that, if we aren't getting it already
+        to_download.add((fasta_id, index_id))
+        
+    # Start preparing vg arguments
+    vg_args = ["vg" "msga"]
+        
+    for fasta_id, index_id in to_download:
+        # Download all the FASTAs
+        fasta_filename = os.path.join(job.fileStore.getLocalTempDir(), "fasta.fa")
+        job.fileStore.readGlobalFile(fasta_id, fasta_filename)
+        fasta_index_filename = fasta_filename + ".fai"
+        job.fileStore.readGlobalFile(index_id, fasta_index_filename)
+        vg_args += ["--from", fasta_filename]
+        
+    for contig in alt_contigs:
+        # Say to load only the contigs we want.
+        vg_args += ["--name", contig]
+        
+    # Base on the graph we have
+    base_graph_filename = job.fileStore.readGlobalFile(vg_id)
+    vg_args += ["--graph", base_graph_filename]
+    
+    # Where will we put the output graph?    
+    out_graph_filename = job.fileStore.getLocalTempFile()
+    
+    RealtimeLogger.info("Running vg with: {}".format(vg_args))
+    
+    # Augment the graph with MSGA
+    with open(out_graph_filename, "w") as graph_file:
+        subprocess.check_call(["vg"] + vg_args, stdout=graph_file)
+    
+    # Upload the graph
+    return job.fileStore.writeGlobalFile(out_graph_filename)
+    
         
 def main(args):
     """
