@@ -65,6 +65,8 @@ def parse_args(args):
     parser.add_argument("--vcfs_url", default=("ftp://ftp.1000genomes.ebi.ac.uk/"
         "vol1/ftp/release/20130502/supporting/GRCh38_positions"),
         help="directory of VCFs per chromosome") 
+    parser.add_argument("--chromosome", default=None,
+        help="If specified, restrict to a single chromosome (like \"22\")")
     
     # The command line arguments start with the program name, which we don't
     # want to treat as an argument for argparse. So we remove it.
@@ -311,8 +313,12 @@ def align_alts_job(job, options, plan, vg_id, chromosome_name, alt_to_fasta):
         # Remember to get that, if we aren't getting it already
         to_download.add((fasta_id, index_id))
         
+    if len(to_download) == 0:
+        # There's nothing to add in. Re-use the original graph
+        return vg_id
+        
     # Start preparing vg arguments
-    vg_args = ["vg" "msga"]
+    vg_args = ["msga", "--allow-nonpath"]
         
     for fasta_id, index_id in to_download:
         # Download all the FASTAs
@@ -330,6 +336,11 @@ def align_alts_job(job, options, plan, vg_id, chromosome_name, alt_to_fasta):
     base_graph_filename = job.fileStore.readGlobalFile(vg_id)
     vg_args += ["--graph", base_graph_filename]
     
+    # Validate the input graph before using it
+    RealtimeLogger.info("Validating input graph: {}".format(
+        base_graph_filename))
+    subprocess.check_call(["vg", "validate", base_graph_filename])
+    
     # Where will we put the output graph?    
     out_graph_filename = job.fileStore.getLocalTempFile()
     
@@ -338,6 +349,11 @@ def align_alts_job(job, options, plan, vg_id, chromosome_name, alt_to_fasta):
     # Augment the graph with MSGA
     with open(out_graph_filename, "w") as graph_file:
         subprocess.check_call(["vg"] + vg_args, stdout=graph_file)
+    
+    # Validate the output graph after building it
+    RealtimeLogger.info("Validating output graph: {}".format(
+        out_graph_filename))
+    subprocess.check_call(["vg", "validate", out_graph_filename])
     
     # Upload the graph
     return job.fileStore.writeGlobalFile(out_graph_filename)
@@ -379,6 +395,10 @@ def main(args):
             # Import all the files from the plan. Now the plan will hold Toil IDs
             # for data files, and actual info for metadata files.
             plan.bake(lambda url: toil_instance.importFile(url))
+            
+            if options.chromosome is not None:
+                # Restrict to just this chromosome name
+                plan.restrict_to_chromosome(options.chromosome)
     
             # Make a root job
             root_job = Job.wrapJobFn(main_job, options, plan,

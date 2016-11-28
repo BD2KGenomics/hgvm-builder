@@ -301,8 +301,28 @@ class ReferencePlan(object):
                 imported_id))
             # Remember that this is the index for that VCF
             self.index_ids[self.vcf_ids[chrom_name]] = imported_id
+    
+    def restrict_to_chromosome(self, name):
+        """
+        After baking the plan, remove everything that isn't on the chromosome
+        with the given name.
+        """
         
-        
+        # Filter down to just the primary ID for this chromosome
+        self.primary_ids = [x for x in self.primary_ids if
+            self.accession_to_chromosome_name(x) == name]
+            
+        # And just the alt IDs that belong to that chromosome
+        self.alt_ids = [x for x in self.alt_ids if
+            self.accession_to_chromosome_name(self.get_alt_parent(x)) == name]
+            
+        if self.vcf_ids.has_key(name):
+            # Keep only the VCF for this chromosome, if we have one
+            self.vcf_ids = {name : self.vcf_ids[name]}
+        else:
+            # Otherwise keep no VCFs
+            self.vcf_ids = {}
+                
     def set_chromosome_name(self, accession, name):
         """
         Set the chromosome name for a primary scaffold. Takes the
@@ -315,7 +335,7 @@ class ReferencePlan(object):
         
     def set_alt_parent(self, alt_accession, parent_accession):
         """
-        Takes the accession.version string (like "LOL1234.1") fort an alt
+        Takes the accession.version string (like "LOL1234.1") for an alt
         scaffold and a primary scaffold, and makes the primary scaffold the
         parent of the alt scaffold. This means that the alt scaffold will be
         aligned against and merged into the subgraph derived from the primary
@@ -323,6 +343,15 @@ class ReferencePlan(object):
         """
 
         self.alt_parents[alt_accession] = parent_accession
+        
+    def get_alt_parent(self, alt_accession):
+        """
+        Takes the accession.version string (like "LOL1234.1") for an alt
+        scaffold, and returns the accession.version string of the primary
+        scaffold it belongs to.
+        """
+
+        return self.alt_parents[alt_accession]
         
     def get_children(self, parent_accession):
         """
