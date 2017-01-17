@@ -81,7 +81,7 @@ def parse_args(args):
         
     return parser.parse_args(args)
    
-def create_plan(assembly_url=None, vcfs_url=None, hal_url=None, base_vg_url=None):
+def create_plan(assembly_url, vcfs_url, hal_url, base_vg_url):
     """
     Given an FTP or file url to the root of a GRC-format assembly_structure
     directory tree, and an FTP or file URL to a directory of chrXXX VCFs,
@@ -155,6 +155,8 @@ def concat_lists_job(job, lists):
     
     """
     
+    RealtimeLogger.info("Concatenating {} lists".format(len(lists)))
+    
     concatenated = []
     
     for l in lists:
@@ -178,7 +180,7 @@ def hal2vg_job(job, options, plan, hal_id):
     # Find all the sequences in the genome we want
     sequences_string = options.drunner.call([["halStats", hal_file, "--sequences", options.hal_genome]], check_output=True)
     # Get a list of them
-    sequences = sequences_string.trim().split(",")
+    sequences = sequences_string.strip().split(",")
     
     # TODO: we assume that these sequence names are unique in the HAL even
     # without the genome
@@ -191,7 +193,7 @@ def hal2vg_job(job, options, plan, hal_id):
         mod_args.append(sequence_name)
         RealtimeLogger.info("Retaining sequence {} from genome {}".format(sequence_name, options.hal_genome))
         
-    with job.writeGlobalFileStream() as (vg_handle, vg_id):
+    with job.fileStore.writeGlobalFileStream() as (vg_handle, vg_id):
         # Make a vg and retain only the parts involved in the requested genome.
         # Save directly into the file store.
         options.drunner.call([["hal2vg", hal_file, "--chop", "1000000", "--inMemory", "--onlySequenceNames"],
@@ -214,6 +216,8 @@ def main_job(job, options, plan):
     
     # If we have base VGs, put them in the list
     base_vgs.append(list(plan.for_each_base_vg()))
+    
+    RealtimeLogger.info("Loading {} VGs".format(len(base_vgs[0])))
 
     # Get promises for converting all the HALs into VGs    
     hal_promises = []
@@ -224,9 +228,11 @@ def main_job(job, options, plan):
     for hal_id in plan.for_each_hal():
         # Make a child to convert each HAL to VG
         child = job.addChildJobFn(hal2vg_job, options, plan, hal_id,
-            cores=1, memory="30G", disk="5G")
+            cores=1, memory="100G", disk="5G")
         hal_promises.append(child.rv())
         hal_children.append(child)
+        
+    RealtimeLogger.info("Converting {} HALs".format(len(hal_children)))
 
     # Add those to the list of vg graphs we have to start with
     base_vgs.append(hal_promises)
@@ -238,7 +244,7 @@ def main_job(job, options, plan):
         cores=1, memory="1G", disk="1G")
     for before_child in hal_children:
         # Make sure HAL children run before this job that uses their RVs
-        before_child.addFollowOnJob(concat_job)
+        before_child.addFollowOn(concat_job)
     
     # Then return the list of all the VGs we have converted from HAL or taken in
     # to start with.
@@ -261,11 +267,14 @@ def main(args):
     logging.basicConfig(level=logging.INFO)
     
     # Make sure VG is available
-    subprocess.check_call(["vg", "version"])
+    options.drunner.call([["vg", "version"]])
     
     # And samtools
     # TODO: use vg to index FASTAs once, somehow.
-    subprocess.check_call(["samtools", "--version"])
+    options.drunner.call([["samtools", "--version"]])
+    
+    # And hal2vg (which can't be made to succeed with no real arguments...)
+    options.drunner.call([["which", "hal2vg"]])
     
     logging.info("Running on Toil from {}".format(toil.__file__))
     
@@ -279,7 +288,8 @@ def main(args):
             # Run from the top
         
             # Build the plan on the head node
-            plan = create_plan(options.assembly_url, options.vcfs_url)
+            plan = create_plan(options.assembly_url, options.vcfs_url,
+                options.hal_url, options.base_vg_url)
         
             # Import all the files from the plan. Now the plan will hold Toil
             # IDs for data files, and actual info for metadata files.

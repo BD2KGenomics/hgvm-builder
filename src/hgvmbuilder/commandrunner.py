@@ -1,6 +1,7 @@
 #hgvm-builder commandrunner.py: tool for running commands and pipelines
 
 import logging
+import subprocess
 
 # Get a submodule-global logger
 Logger = logging.getLogger("commandrunner")
@@ -20,7 +21,7 @@ class CommandRunner(object):
         Call the given command or pipeline directly.
         """
 
-        RealTimeLogger.get().info("Run: {}".format(" | ".join(" ".join(x) for x in args)))
+        Logger.info("Run: {}".format(" | ".join(" ".join(x) for x in args)))
 
         # this is all that docker_call does with the inputs parameter:
         for filename in inputs:

@@ -114,7 +114,7 @@ class ReferencePlan(object):
         
         self.hal_urls.append(url)
         
-    def for_each_hal():
+    def for_each_hal(self):
         """
         In a baked plan, return an iterator over HAL IDs.
         """
@@ -129,7 +129,7 @@ class ReferencePlan(object):
         
         self.base_vg_urls.append(url)
         
-    def for_each_base_vg():
+    def for_each_base_vg(self):
         """
         In a baked plan, return an iterator over base VG IDs.
         """
