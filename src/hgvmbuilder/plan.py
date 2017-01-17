@@ -12,19 +12,17 @@ class ReferencePlan(object):
     Represents a plan to build a graph reference, or (Human) Genome Variation
     Map.
     
-    Consists of a set of base contigs from an assembly (the primary path for
-    each chromosome, plus unplaced things), some variants to apply to those
-    contigs, some additional contigs to merge into each of those contigs, and
-    some new samples to map in and extract variants from.
+    Consists of a set of a base graph in VG or HAL format and some variants to
+    apply (and the assembly used to interpret those variants).
     
     Also keeps track of what VCF contigs/chromosomes map to what graph-space
     path names (which should all be in accession.version format), and what alt
     contigs are children of what primary contigs (and so should be aligned to
     them).
     
-    After making a plan, and adding FASTAs, VCFs, and metadata files to it with
-    the appropriate methods, call bake() to download the metadata and import the
-    data files into a Toil filestore.
+    After making a plan, and adding HALs, VGs, FASTAs, VCFs, and metadata files
+    to it with the appropriate methods, call bake() to download the metadata and
+    import the data files into a Toil filestore.
     
     """
     
@@ -93,6 +91,50 @@ class ReferencePlan(object):
         # later, not in the plan setup, because we have to break open a large
         # number of FASTAs.
         
+        # We also hold files that can bring in whole graphs at various stages of
+        # the process
+        
+        # These are the URLs of HAL files representing graphs to start with
+        self.hal_urls = []
+        # And these are their IDs after uploading
+        self.hal_ids = []
+        
+        # These are the URLs of VG graphs that we pull in as already converted
+        # from HAL
+        self.base_vg_urls = []
+        # And these are their IDs after uploading
+        self.base_vg_ids = []
+        
+    
+    def add_hal(self, url):
+        """
+        Add a HAL file to base the initial graph on.
+        
+        """
+        
+        self.hal_urls.append(url)
+        
+    def for_each_hal():
+        """
+        In a baked plan, return an iterator over HAL IDs.
+        """
+        
+        return iter(self.hal_ids)
+        
+    def add_base_vg(self, url):
+        """
+        Add a VG file to base the initial graph on.
+        
+        """
+        
+        self.base_vg_urls.append(url)
+        
+    def for_each_base_vg():
+        """
+        In a baked plan, return an iterator over base VG IDs.
+        """
+        
+        return iter(self.base_vg_ids)
     
     def add_primary_scaffold_fasta(self, url):
         """
@@ -200,13 +242,13 @@ class ReferencePlan(object):
         """
         Iterate over primary input FASTA IDs.
         """
-        return self.primary_ids
+        return iter(self.primary_ids)
         
     def for_each_alt_fasta_id(self):
         """
         Iterate over alt input FASTA IDs.
         """
-        return self.alt_ids 
+        return iter(self.alt_ids) 
             
     def for_each_vcf_id_by_chromosome(self):
         """
@@ -301,6 +343,20 @@ class ReferencePlan(object):
                 imported_id))
             # Remember that this is the index for that VCF
             self.index_ids[self.vcf_ids[chrom_name]] = imported_id
+            
+        for hal_url in self.hal_urls:
+            # Import all the HALs
+            imported_id = import_function(hal_url)
+            Logger.info("Imported HAL {} as {}".format(hal_url,
+                imported_id))
+            self.hal_ids.append(imported_id)
+            
+        for base_vg_url in self.base_vg_urls:
+            # Import all the base VGs
+            imported_id = import_function(base_vg_url)
+            Logger.info("Imported base VG {} as {}".format(base_vg_url,
+                imported_id))
+            self.base_vg_ids.append(imported_id)
     
     def set_chromosome_name(self, accession, name):
         """

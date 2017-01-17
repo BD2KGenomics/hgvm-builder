@@ -31,6 +31,7 @@ from .plan import ReferencePlan
 from . import grcparser
 from . import thousandgenomesparser
 from .transparentunzip import TransparentUnzip
+from .commandrunner import CommandRunner
 
 # Get a submodule-global logger
 Logger = logging.getLogger("build")
@@ -57,16 +58,22 @@ def parse_args(args):
     Job.Runner.addToilOptions(parser)
     
     # General options
-    parser.add_argument("--assembly_url",
-        default=("ftp://ftp.ncbi.nlm.nih.gov/genomes/all/"
-        "GCA_000001405.24_GRCh38.p9/"
-        "GCA_000001405.24_GRCh38.p9_assembly_structure"),
-        help="root of input assembly structure in GRC format")
-    parser.add_argument("--vcfs_url", default=("ftp://ftp.1000genomes.ebi.ac.uk/"
-        "vol1/ftp/release/20130502/supporting/GRCh38_positions"),
-        help="directory of VCFs per chromosome") 
     parser.add_argument("--chromosome", default=None,
         help="If specified, restrict to a single chromosome (like \"22\")")
+    
+    # Data sources
+    parser.add_argument("--hal_url", default=None,
+        help="start with the given HAL file and convert it to vg")
+    parser.add_argument("--base_vg_url", default=None,
+        help="start with this VG file instead of converting from HAL")
+    parser.add_argument("--assembly_url", default=None,
+        help="root of input assembly structure in GRC format")
+    parser.add_argument("--vcfs_url", default=None,
+        help="directory of VCFs per chromosome") 
+        
+    # HAL interpretation
+    parser.add_argument("--hal_genome", default="Human",
+        help="extract the given genome from HAL files")
     
     # The command line arguments start with the program name, which we don't
     # want to treat as an argument for argparse. So we remove it.
@@ -74,7 +81,7 @@ def parse_args(args):
         
     return parser.parse_args(args)
    
-def create_plan(assembly_url, vcfs_url):
+def create_plan(assembly_url=None, vcfs_url=None, hal_url=None, base_vg_url=None):
     """
     Given an FTP or file url to the root of a GRC-format assembly_structure
     directory tree, and an FTP or file URL to a directory of chrXXX VCFs,
@@ -84,15 +91,25 @@ def create_plan(assembly_url, vcfs_url):
     # Make the plan
     plan = ReferencePlan()
 
-    # Parse the assembly and populate the plan    
-    grcparser.parse(plan, assembly_url)
+    if assembly_url is not None:
+        # Parse the assembly and populate the plan    
+        grcparser.parse(plan, assembly_url)
     
-    # Parse the VCF directory and add the VCFs
-    thousandgenomesparser.parse(plan, vcfs_url)
+    if vcfs_url is not None:
+        # Parse the VCF directory and add the VCFs
+        thousandgenomesparser.parse(plan, vcfs_url)
+    
+    if hal_url is not None:
+        # We have a HAL file to convert to VG
+        plan.add_hal(hal_url)
+        
+    if base_vg_url is not None:
+        # We have a VG file already converted from HAL
+        plan.add_base_vg(base_vg_url)
     
     # Return the completed plan
     return plan
-    
+   
 def prepare_fasta(job, fasta_id):
     """
     Given a job and a FASTA ID in its file store, download, decompress, scan,
@@ -130,241 +147,102 @@ def prepare_fasta(job, fasta_id):
     return (job.fileStore.writeGlobalFile(filename),
         job.fileStore.writeGlobalFile(filename + ".fai"), accessions)
     
+def concat_lists_job(job, lists):
+    """
+    Given a list of lists, concatenate them and return the result.
+    
+    Used to get a promise for the concatenation of promised lists.
+    
+    """
+    
+    concatenated = []
+    
+    for l in lists:
+        for item in l:
+            # Put each item in each list into the big list
+            concatenated.append(item)
+            
+    return concatenated
+    
+def hal2vg_job(job, options, plan, hal_id):
+    """
+    Convert a HAL file to a VG file and return the ID of the resulting vg graph.
+    
+    """
+    
+    # Download the HAL
+    hal_file = job.fileStore.readGlobalFile(hal_id)
+    
+    RealtimeLogger.info("Converting HAL {}".format(hal_id))
+    
+    # Find all the sequences in the genome we want
+    sequences_string = options.drunner.call([["halStats", hal_file, "--sequences", options.hal_genome]], check_output=True)
+    # Get a list of them
+    sequences = sequences_string.trim().split(",")
+    
+    # TODO: we assume that these sequence names are unique in the HAL even
+    # without the genome
+    
+    # Build a command to keep only the given paths in a vg file, and also chop
+    mod_args = ["vg", "mod", "-", "--remove-non-path", "--chop", "100"]
+    for sequence_name in sequences:
+        # Retain each path in the correct genome
+        mod_args.append("--retain-path")
+        mod_args.append(sequence_name)
+        RealtimeLogger.info("Retaining sequence {} from genome {}".format(sequence_name, options.hal_genome))
+        
+    with job.writeGlobalFileStream() as (vg_handle, vg_id):
+        # Make a vg and retain only the parts involved in the requested genome.
+        # Save directly into the file store.
+        options.drunner.call([["hal2vg", hal_file, "--chop", "1000000", "--inMemory", "--onlySequenceNames"],
+            mod_args], outfile=vg_handle)
+            
+        RealtimeLogger.info("Created VG graph {}".format(vg_id))
+            
+        return vg_id
     
     
 def main_job(job, options, plan):
     """
-    Root Toil job. Execute the plan. Returns a list of graph file IDs to export.
+    Root Toil job. Returns a list of file IDs for parts of the constructed
+    graph.
     """
     
-    # This holds uncompressed FASTA ID, index ID, and contig list tuples from
-    # prepared primary FASTAs
-    prepared_primary = []
-    # And this holds the same things for alt FASTAs
-    prepared_alt = []
+    # This list will hold lists of vg graphs, or promises of lists of vg graphs,
+    # before any variants have been added.
+    base_vgs = []
     
-    # This holds child jobs that process FASTAs
-    fasta_children = []
-    
-    for fasta_id in plan.for_each_primary_fasta_id():
-        # Prepare each primary FASTA
-        child = job.addChildJobFn(prepare_fasta, fasta_id,
-            cores="1", memory="4G", disk="5G")
-        fasta_children.append(child)
-        prepared_primary.append(child.rv())
-        
-    
-    for fasta_id in plan.for_each_alt_fasta_id():
-        # Prepare each alt FASTA
-        child = job.addChildJobFn(prepare_fasta, fasta_id,
-            cores="1", memory="4G", disk="5G")
-        fasta_children.append(child)
-        prepared_alt.append(child.rv())
-            
-    # Add a child that will use those FASTAs, and return what it returns
-    last_child = job.addChildJobFn(find_fastas_and_run_builds_job, options,
-        plan, prepared_primary, prepared_alt, cores="1", memory="4G", disk="1G")
-        
-    for child in fasta_children:
-        # Make sure all the other children are done before this last one can
-        # start
-        child.addFollowOn(last_child)
-    
-    # Return what that last child returns
-    return last_child.rv()
-    
+    # If we have base VGs, put them in the list
+    base_vgs.append(list(plan.for_each_base_vg()))
 
+    # Get promises for converting all the HALs into VGs    
+    hal_promises = []
+    
+    # Remember all the child jobs that make them
+    hal_children = []
+    
+    for hal_id in plan.for_each_hal():
+        # Make a child to convert each HAL to VG
+        child = job.addChildJobFn(hal2vg_job, options, plan, hal_id,
+            cores=1, memory="30G", disk="5G")
+        hal_promises.append(child.rv())
+        hal_children.append(child)
 
-def find_fastas_and_run_builds_job(job, options, plan, prepared_primary, prepared_alt):
-    """
-    Given the list of results from preparing all the primary FASTAs, and the
-    list of results from preparing all the alt FASTAs, run the graph build.
-    Returns a list of file IDs for vg graphs to export.
-    """
-    
-    # This maps from primary accession to uncompressed fasta ID and index ID.
-    primary_to_fasta = {}
-    
-    # This maps from alt accession to uncompressed fasta ID and index ID.
-    alt_to_fasta = {}
-    
-    for uncompressed_id, index_id, contigs in prepared_primary:
-        # Look at all the prepared primary FASTAs
-        for contig in contigs:
-            # Every contig found in that FASTA points to the uncompressed FASTA
-            # and its index.
-            primary_to_fasta[contig] = (uncompressed_id, index_id)
-            
-    
-    for uncompressed_id, index_id, contigs in prepared_alt:
-        # Look at all the prepared alt FASTAs
-        for contig in contigs:
-            # Every contig found in that FASTA points to the uncompressed FASTA
-            # and its index.
-            alt_to_fasta[contig] = (uncompressed_id, index_id)
-           
-    # Grab the dict of VCF IDs by chromosome names
-    # TODO: stop converting back and forth
-    vcf_ids_by_chromosome = dict(plan.for_each_vcf_id_by_chromosome())
-            
-    # Build a list of VG graph promises
-    contig_graph_ids = []
-    
-    RealtimeLogger.info("Building graph from {} primary contigs and {} "
-        "VCFs".format(len(primary_to_fasta), len(vcf_ids_by_chromosome)))
-            
-    for (accession, (fasta_id, fasta_index_id)) in primary_to_fasta.iteritems():
-        # For each primary accession, grab its FASTA ID and index ID
-        
-        # Get the chromosome name (or just the accession again if it doesn't
-        # have one)
-        chromosome_name = plan.accession_to_chromosome_name(accession)
-        
-        if (options.chromosome is not None and
-            options.chromosome != chromosome_name):
-            # We want a specific primary contig and it's not this one.
-            continue
-        
-        # Grab its VCF ID and VCF index ID, if any
-        vcf_id = None
-        vcf_index_id = None
-        
-        if vcf_ids_by_chromosome.has_key(chromosome_name):
-            # We catually have these files
-            vcf_id = vcf_ids_by_chromosome[chromosome_name]
-            vcf_index_id = plan.get_index_id(vcf_id)
-        
-        # Dispatch a child to build it with those four files and the contig name
-        # (or accession if there is no contig name).
-        base_job = job.addChildJobFn(make_chromosome_graph_job, options, plan,
-            chromosome_name, fasta_id, fasta_index_id, vcf_id, vcf_index_id,
-            cores="1", memory="10G", disk="50G")
-            
-        # And another child to augment the graph with alts with vg msga
-        msga_job = base_job.addFollowOnJobFn(align_alts_job, options, plan,
-            base_job.rv(), chromosome_name, alt_to_fasta,
-            cores="16", memory="100G", disk="50G")
-            
-        contig_graph_ids.append(msga_job.rv())
-        
-    return contig_graph_ids
-            
-def make_chromosome_graph_job(job, options, plan, chromosome_name, fasta_id,
-    fasta_index_id, vcf_id, vcf_index_id):
-    """
-    Download the FASTA and its index, and the VCF and its index if given, and
-    use vg to make a graph for the contig with the given name in VCF space.
-    Resulting graph will have contigs named in FASTA accession.version
-    namespace.
-    
-    """
-    
-    # Compose some VG arguments. We want to build just this one contig.
-    vg_args = ["construct", "--region", chromosome_name, "--region-is-chrom"]
-    
-    if vcf_id is not None:
-        # We have a VCF and an index. Download them.
-        vcf_filename = os.path.join(job.fileStore.getLocalTempDir(), "vcf.vcf.gz")
-        job.fileStore.readGlobalFile(vcf_id, vcf_filename)
-        vcf_index_filename = vcf_filename + ".tbi"
-        job.fileStore.readGlobalFile(vcf_index_id, vcf_index_filename)
-        
-        vg_args += ["--vcf", vcf_filename]
-        
-    # Download the FASTA and FASTA index
-    fasta_filename = os.path.join(job.fileStore.getLocalTempDir(), "fasta.fa")
-    job.fileStore.readGlobalFile(fasta_id, fasta_filename)
-    fasta_index_filename = fasta_filename + ".fai"
-    job.fileStore.readGlobalFile(fasta_index_id, fasta_index_filename)
-    vg_args += ["--reference", fasta_filename]
+    # Add those to the list of vg graphs we have to start with
+    base_vgs.append(hal_promises)
 
-    # Add the necessary rename for this chromosome to its accession
-    vg_args += ["--rename", "{}={}".format(chromosome_name,
-        plan.chromosome_name_to_accession(chromosome_name))]
-
-    # Where will we put the graph?    
-    graph_filename = job.fileStore.getLocalTempFile()
+    # TODO: process the VG graphs and add in variants to them somehow.
     
-    RealtimeLogger.info("Running vg with: {}".format(vg_args))
+    # Make a master list of graphs to return
+    concat_job = job.addChildJobFn(concat_lists_job, base_vgs,
+        cores=1, memory="1G", disk="1G")
+    for before_child in hal_children:
+        # Make sure HAL children run before this job that uses their RVs
+        before_child.addFollowOnJob(concat_job)
     
-    # Build the graph
-    with open(graph_filename, "w") as graph_file:
-        subprocess.check_call(["vg"] + vg_args, stdout=graph_file)
-    
-    # Upload the graph
-    return job.fileStore.writeGlobalFile(graph_filename)
-    
-def align_alts_job(job, options, plan, vg_id, chromosome_name, alt_to_fasta):
-    """
-    Download the given VG graph for a single chromosome, and align all the alts
-    for that chromosome progressively to it.        
-    
-    Takes a dict from alt contig accession to FASTA and index file IDs (which
-    may repeat).
-    
-    Returns the ID of the new graph.
-    """
-    
-    # Collect the alt contig names that are on this chromosome
-    alt_contigs = plan.get_children(plan.chromosome_name_to_accession(
-        chromosome_name))
-    
-    # Make a set of FASTA, index pairs we will need to download
-    to_download = set()
-    
-    for contig in alt_contigs:
-        # Figure out what FASTA we need to find this contig in
-        fasta_id, index_id = alt_to_fasta[contig]
-        # Remember to get that, if we aren't getting it already
-        to_download.add((fasta_id, index_id))
-        
-    if len(to_download) == 0:
-        # There's nothing to add in. Re-use the original graph
-        return vg_id
-        
-    # Start preparing vg arguments
-    vg_args = ["msga", "--allow-nonpath", "-t", "16", "--idx-kmer-size", "16",
-        "--idx-edge-max", "3", "--idx-prune-subs", "32", "--node-max", "100",
-        "--idx-doublings", "3"]
-        
-    for fasta_id, index_id in to_download:
-        # Download all the FASTAs
-        fasta_filename = os.path.join(job.fileStore.getLocalTempDir(), "fasta.fa")
-        job.fileStore.readGlobalFile(fasta_id, fasta_filename)
-        fasta_index_filename = fasta_filename + ".fai"
-        job.fileStore.readGlobalFile(index_id, fasta_index_filename)
-        vg_args += ["--from", fasta_filename]
-        
-    for contig in alt_contigs:
-        # Say to load only the contigs we want.
-        vg_args += ["--name", contig]
-        
-    # Base on the graph we have
-    base_graph_filename = job.fileStore.readGlobalFile(vg_id)
-    vg_args += ["--graph", base_graph_filename]
-    
-    # Validate the input graph before using it
-    RealtimeLogger.info("Validating input graph: {}".format(
-        base_graph_filename))
-    subprocess.check_call(["vg", "validate", base_graph_filename])
-    
-    # Where will we put the output graph?    
-    out_graph_filename = job.fileStore.getLocalTempFile()
-    
-    RealtimeLogger.info("Running vg with: {}".format(vg_args))
-    
-    # Augment the graph with MSGA
-    with open(out_graph_filename, "w") as graph_file:
-        subprocess.check_call(["vg"] + vg_args, stdout=graph_file)
-    
-    # Validate the output graph after building it
-    RealtimeLogger.info("Validating output graph: {}".format(
-        out_graph_filename))
-    subprocess.check_call(["vg", "validate", out_graph_filename])
-    
-    # Upload the graph
-    return job.fileStore.writeGlobalFile(out_graph_filename)
-    
+    # Then return the list of all the VGs we have converted from HAL or taken in
+    # to start with.
+    return concat_job.rv()
         
 def main(args):
     """
@@ -374,6 +252,10 @@ def main(args):
     """
     
     options = parse_args(args) # This holds the nicely-parsed options object
+    
+    # Cram a CommandRunner into the options, so our internal API looks like
+    # toil-vg's.
+    options.drunner = CommandRunner()
     
     # Set up logging
     logging.basicConfig(level=logging.INFO)
@@ -399,15 +281,15 @@ def main(args):
             # Build the plan on the head node
             plan = create_plan(options.assembly_url, options.vcfs_url)
         
-            # Import all the files from the plan. Now the plan will hold Toil IDs
-            # for data files, and actual info for metadata files.
+            # Import all the files from the plan. Now the plan will hold Toil
+            # IDs for data files, and actual info for metadata files.
             plan.bake(lambda url: toil_instance.importFile(url))
-            
+        
             # Make a root job
             root_job = Job.wrapJobFn(main_job, options, plan,
                 cores=1, memory="1G", disk="1G")
             
-            # Run the root job
+            # Run the root job and get one or more IDs for vg graphs, in a list
             graph_ids = toil_instance.start(root_job)
         
         for i, graph_id in enumerate(graph_ids):
