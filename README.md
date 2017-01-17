@@ -6,29 +6,35 @@ The basic workflow will be:
 
 1. Start with a GRC assembly, like ftp://ftp.ncbi.nlm.nih.gov/genomes/all/GCA_000001405.24_GRCh38.p9/GCA_000001405.24_GRCh38.p9_assembly_structure/
 
-2. Break out top-level contigs (chromosomes and unplaced scaffolds) and construct them into graphs, along with applicable VCFs, using vg
+2. Build it into a HAL-fromat graph with Cactus
 
-3. Merge these graphs together and index them
+3. Convert the graph into vg format
 
-4. Align and merge in alt locus sequences, fix and novel patches and other full-length assemblies.
+4. Add variation to the graph from one or more VCF files
 
-5. Align, call, and integrate collections of short read data
+5. Index the graph for alignment and variant calling
+
+6. Align, call, and integrate collections of short read data
 
 ## Data Sources
 
 Data from a variety of sources will be combined to build the HGVM.
 
-### Sprint 1
+### HGVM 0.1 Alpha
 
 For the first pass, only two data sources will be incorporated.
 
-- [ ] The GRCh38 assembly, including alt loci and novel and fix patches.
+- [ ] The GRCh38 assembly, including alt loci
 
-- [ ] The 1000 Genomes Project lifted-over VCFs
+- [ ] The 1000 Genomes Project small variant VCFs
+
+- [ ] The 1000 Genomes Project structural variant VCFs
 
 ### Subsequent Sprints
 
 Once the basic infrastructure for building a graph, the following data sources will be added.
+
+- [ ] GRCh38 novel and fix patches
 
 - [ ] The Simons Genome Diversity Project
 
