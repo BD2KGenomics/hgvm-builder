@@ -220,6 +220,11 @@ def find_fastas_and_run_builds_job(job, options, plan, prepared_primary, prepare
         # have one)
         chromosome_name = plan.accession_to_chromosome_name(accession)
         
+        if (options.chromosome is not None and
+            options.chromosome != chromosome_name):
+            # We want a specific primary contig and it's not this one.
+            continue
+        
         # Grab its VCF ID and VCF index ID, if any
         vcf_id = None
         vcf_index_id = None
@@ -238,7 +243,7 @@ def find_fastas_and_run_builds_job(job, options, plan, prepared_primary, prepare
         # And another child to augment the graph with alts with vg msga
         msga_job = base_job.addFollowOnJobFn(align_alts_job, options, plan,
             base_job.rv(), chromosome_name, alt_to_fasta,
-            cores="1", memory="50G", disk="50G")
+            cores="16", memory="100G", disk="50G")
             
         contig_graph_ids.append(msga_job.rv())
         
@@ -318,7 +323,9 @@ def align_alts_job(job, options, plan, vg_id, chromosome_name, alt_to_fasta):
         return vg_id
         
     # Start preparing vg arguments
-    vg_args = ["msga", "--allow-nonpath"]
+    vg_args = ["msga", "--allow-nonpath", "-t", "16", "--idx-kmer-size", "16",
+        "--idx-edge-max", "3", "--idx-prune-subs", "32", "--node-max", "100",
+        "--idx-doublings", "3"]
         
     for fasta_id, index_id in to_download:
         # Download all the FASTAs
@@ -396,10 +403,6 @@ def main(args):
             # for data files, and actual info for metadata files.
             plan.bake(lambda url: toil_instance.importFile(url))
             
-            if options.chromosome is not None:
-                # Restrict to just this chromosome name
-                plan.restrict_to_chromosome(options.chromosome)
-    
             # Make a root job
             root_job = Job.wrapJobFn(main_job, options, plan,
                 cores=1, memory="1G", disk="1G")

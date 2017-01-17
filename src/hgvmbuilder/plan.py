@@ -302,27 +302,6 @@ class ReferencePlan(object):
             # Remember that this is the index for that VCF
             self.index_ids[self.vcf_ids[chrom_name]] = imported_id
     
-    def restrict_to_chromosome(self, name):
-        """
-        After baking the plan, remove everything that isn't on the chromosome
-        with the given name.
-        """
-        
-        # Filter down to just the primary ID for this chromosome
-        self.primary_ids = [x for x in self.primary_ids if
-            self.accession_to_chromosome_name(x) == name]
-            
-        # And just the alt IDs that belong to that chromosome
-        self.alt_ids = [x for x in self.alt_ids if
-            self.accession_to_chromosome_name(self.get_alt_parent(x)) == name]
-            
-        if self.vcf_ids.has_key(name):
-            # Keep only the VCF for this chromosome, if we have one
-            self.vcf_ids = {name : self.vcf_ids[name]}
-        else:
-            # Otherwise keep no VCFs
-            self.vcf_ids = {}
-                
     def set_chromosome_name(self, accession, name):
         """
         Set the chromosome name for a primary scaffold. Takes the
