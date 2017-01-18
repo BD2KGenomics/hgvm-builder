@@ -195,19 +195,80 @@ def hal2vg_job(job, options, plan, hal_id):
         
     with job.fileStore.writeGlobalFileStream() as (vg_handle, vg_id):
         # Make a vg and retain only the parts involved in the requested genome.
+        # Also sort it so IDs will start at 1 again.
         # Save directly into the file store.
         options.drunner.call([["hal2vg", hal_file, "--chop", "1000000", "--inMemory", "--onlySequenceNames"],
-            mod_args], outfile=vg_handle)
+            mod_args,
+            ["vg", "ids", "-s", "-"]], outfile=vg_handle)
             
         RealtimeLogger.info("Created VG graph {}".format(vg_id))
             
         return vg_id
+        
+def xg_index_job(job, options, plan, vg_id):
+    """
+    Index the given VG graph into an XG file. Returns the ID of the XG file.
+    """
+    
+    # Download the VG file
+    vg_name = job.fileStore.readGlobalFile(vg_id)
+    
+    # Make an XG name
+    xg_name = os.path.join(job.fileStore.getLocalTempDir(), "index.xg")
+    
+    # Set up args for the VG call
+    vg_args = ["vg", "index", "-x", xg_name, vg_name]
+    
+    # Run the call
+    options.drunner.call([vg_args])
+    
+    # Upload the file
+    return job.fileStore.writeGlobalFile(xg_name)
+    
+def merge_vgs_job(job, options, plan, vg_ids):
+    """
+    Merge the given VG graphs into one VG graph. Returns the ID of the merged VG
+    graph.
+    """
+    
+    RealtimeLogger.info("Merging {} graphs".format(len(vg_ids)))
+    
+    if len(vg_ids) == 0:
+        # Can't make a graph from no graphs
+        raise RuntimeError("Cannot merge empty list of VG graphs!")
+    elif len(vg_ids) == 1:
+        # No work to do
+        return vg_ids[0]
+    else:
+        # Actually need to merge
+        # Grab all the graphs
+        vg_names = [job.fileStore.readGlobalFile(vg_id) for vg_id in vg_ids]
+        # Make a new filename for the merged graph
+        merged_name = os.path.join(job.fileStore.getLocalTempDir(), "merged.vg")
+        
+        # Set up a command to merge all the graphs and put them in a shared ID
+        # space
+        vg_args = ["vg", "ids", "-j"] + vg_names
+        
+        with job.fileStore.writeGlobalFileStream() as (vg_handle, vg_id):
+            # Make a merged vg
+            options.drunner.call([vg_args], outfile=vg_handle)
+            
+        return vg_id
+        
+def hals_and_vgs_to_vg(job, options, plan, hal_ids, vg_ids):
+    """
+    Given some input HAL graphs to be converted to VG format, and some input VG
+    graphs, combine all the graphs into one VG file with a consistent ID space.
+    Return the ID of that VG file.
+    """
+
     
     
 def main_job(job, options, plan):
     """
     Root Toil job. Returns a list of file IDs for parts of the constructed
-    graph.
+    graph, and a list of xg index IDs, one per graph part.
     """
     
     # This list will hold lists of vg graphs, or promises of lists of vg graphs,
@@ -216,6 +277,11 @@ def main_job(job, options, plan):
     
     # If we have base VGs, put them in the list
     base_vgs.append(list(plan.for_each_base_vg()))
+    
+    # Make some children to index them
+    xg_index_children = [job.addChildJobFn(options, plan, [vg_id],
+        cores=1, memory="100G", disk="10G") for vg_id in base_vgs]
+    
     
     RealtimeLogger.info("Loading {} VGs".format(len(base_vgs[0])))
 
@@ -227,10 +293,15 @@ def main_job(job, options, plan):
     
     for hal_id in plan.for_each_hal():
         # Make a child to convert each HAL to VG
-        child = job.addChildJobFn(hal2vg_job, options, plan, hal_id,
+        vg_child = job.addChildJobFn(hal2vg_job, options, plan, hal_id,
             cores=1, memory="100G", disk="5G")
-        hal_promises.append(child.rv())
-        hal_children.append(child)
+        hal_promises.append(vg_child.rv())
+        hal_children.append(vg_child)
+        
+        # Make a follow-on after that to index the vg into xg
+        xg_child = vg_child.addFollowOnJobFn(options, plan, [vg_child.rv()],
+            cores=1, memory="100G", disk="10G")
+        xg_index_children.append(xg_child)
         
     RealtimeLogger.info("Converting {} HALs".format(len(hal_children)))
 
@@ -240,16 +311,21 @@ def main_job(job, options, plan):
     # TODO: process the VG graphs and add in variants to them somehow.
     
     # Make a master list of graphs to return
-    concat_job = job.addChildJobFn(concat_lists_job, base_vgs,
+    vg_concat_job = job.addChildJobFn(concat_lists_job, base_vgs,
         cores=1, memory="1G", disk="1G")
     for before_child in hal_children:
         # Make sure HAL children run before this job that uses their RVs
-        before_child.addFollowOn(concat_job)
+        before_child.addFollowOn(vg_concat_job)
+        
+    # Make a master list of their indexes
+    xg_index_list = [indexer.rv() for indexer in xg_index_children]
     
+        
     # Then return the list of all the VGs we have converted from HAL or taken in
     # to start with.
-    return concat_job.rv()
-        
+    return vg_concat_job.rv(), xg_index_list
+    
+    
 def main(args):
     """
     Parses command line arguments and do the work of the program.
@@ -283,7 +359,7 @@ def main(args):
         
         if toil_instance.options.restart:
             # We're re-running. Grab the root job return value from restart
-            graph_ids = toil_instance.restart()
+            graph_ids, index_ids = toil_instance.restart()
         else:
             # Run from the top
         
@@ -300,11 +376,14 @@ def main(args):
                 cores=1, memory="1G", disk="1G")
             
             # Run the root job and get one or more IDs for vg graphs, in a list
-            graph_ids = toil_instance.start(root_job)
+            graph_ids, index_ids = toil_instance.start(root_job)
         
         for i, graph_id in enumerate(graph_ids):
             # Export all the graphs as VG files in arbitrary order
             toil_instance.exportFile(graph_id, "file:./part{}.vg".format(i))
+        for i, index_id in enumerate(index_ids):
+            # Export all the graph indexes as XG files in the same order
+            toil_instance.exportFile(index_id, "file:./part{}.xg".format(i))
         
     print("Toil workflow complete")
     return 0
