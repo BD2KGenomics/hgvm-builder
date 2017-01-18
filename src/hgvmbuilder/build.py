@@ -256,74 +256,57 @@ def merge_vgs_job(job, options, plan, vg_ids):
             
         return vg_id
         
-def hals_and_vgs_to_vg(job, options, plan, hal_ids, vg_ids):
+def hals_and_vgs_to_vg_job(job, options, plan, hal_ids, vg_ids):
     """
     Given some input HAL graphs to be converted to VG format, and some input VG
     graphs, combine all the graphs into one VG file with a consistent ID space.
     Return the ID of that VG file.
     """
-
     
+    # First convert HALs to VG
     
-def main_job(job, options, plan):
-    """
-    Root Toil job. Returns a list of file IDs for parts of the constructed
-    graph, and a list of xg index IDs, one per graph part.
-    """
-    
-    # This list will hold lists of vg graphs, or promises of lists of vg graphs,
-    # before any variants have been added.
-    base_vgs = []
-    
-    # If we have base VGs, put them in the list
-    base_vgs.append(list(plan.for_each_base_vg()))
-    
-    # Make some children to index them
-    xg_index_children = [job.addChildJobFn(options, plan, [vg_id],
-        cores=1, memory="100G", disk="10G") for vg_id in base_vgs]
-    
-    
-    RealtimeLogger.info("Loading {} VGs".format(len(base_vgs[0])))
-
     # Get promises for converting all the HALs into VGs    
-    hal_promises = []
+    converted_vgs = []
     
     # Remember all the child jobs that make them
     hal_children = []
     
-    for hal_id in plan.for_each_hal():
+    for hal_id in hal_ids:
         # Make a child to convert each HAL to VG
-        vg_child = job.addChildJobFn(hal2vg_job, options, plan, hal_id,
+        child = job.addChildJobFn(hal2vg_job, options, plan, hal_id,
             cores=1, memory="100G", disk="5G")
-        hal_promises.append(vg_child.rv())
-        hal_children.append(vg_child)
-        
-        # Make a follow-on after that to index the vg into xg
-        xg_child = vg_child.addFollowOnJobFn(options, plan, [vg_child.rv()],
-            cores=1, memory="100G", disk="10G")
-        xg_index_children.append(xg_child)
+        converted_vgs.append(child.rv())
+        hal_children.append(child)
         
     RealtimeLogger.info("Converting {} HALs".format(len(hal_children)))
 
-    # Add those to the list of vg graphs we have to start with
-    base_vgs.append(hal_promises)
-
-    # TODO: process the VG graphs and add in variants to them somehow.
-    
-    # Make a master list of graphs to return
-    vg_concat_job = job.addChildJobFn(concat_lists_job, base_vgs,
-        cores=1, memory="1G", disk="1G")
-    for before_child in hal_children:
-        # Make sure HAL children run before this job that uses their RVs
-        before_child.addFollowOn(vg_concat_job)
+    # Then make another child to merge all the graphs
+    merge_child = job.addChildJobFn(merge_vgs_job, options, plan,
+        converted_vgs + vg_ids, cores=1, memory="100G", disk="20G")
+    for child in hal_children:
+        # Make sure the merger comes after all the HAL imports
+        child.addFollowOn(merge_child)
         
-    # Make a master list of their indexes
-    xg_index_list = [indexer.rv() for indexer in xg_index_children]
+    return merge_child.rv()
     
-        
-    # Then return the list of all the VGs we have converted from HAL or taken in
-    # to start with.
-    return vg_concat_job.rv(), xg_index_list
+    
+    
+def main_job(job, options, plan):
+    """
+    Root Toil job. Returns a pair of lists of a VG file IDs and XG index file
+    IDs.
+    """
+    
+    # Make a child to convert the HALs and merge the VGs
+    vg_job = job.addChildJobFn(hals_and_vgs_to_vg_job, options, plan,
+        list(plan.for_each_hal()), list(plan.for_each_base_vg()),
+        cores=1, memory="2G", disk="1G")
+    
+    # Add a followon to index it
+    xg_job = vg_job.addFollowOnJobFn(xg_index_job, options, plan, vg_job.rv())
+    
+    # Return the graph and the index
+    return [vg_job.rv()], [xg_job.rv()]
     
     
 def main(args):
