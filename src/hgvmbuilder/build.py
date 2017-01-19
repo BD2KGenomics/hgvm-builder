@@ -72,7 +72,7 @@ def parse_args(args):
         help="directory of VCFs per chromosome") 
         
     # HAL interpretation
-    parser.add_argument("--hal_genome", default="Human",
+    parser.add_argument("--hal_genome", action="append", default=[],
         help="extract the given genome from HAL files")
     
     # The command line arguments start with the program name, which we don't
@@ -177,10 +177,14 @@ def hal2vg_job(job, options, plan, hal_id):
     
     RealtimeLogger.info("Converting HAL {}".format(hal_id))
     
-    # Find all the sequences in the genome we want
-    sequences_string = options.drunner.call([["halStats", hal_file, "--sequences", options.hal_genome]], check_output=True)
-    # Get a list of them
-    sequences = sequences_string.strip().split(",")
+    # Find all the sequences we want
+    sequences = []
+    
+    for genome in options.hal_genome:
+        # Find all the sequences in the genome we want
+        sequences_string = options.drunner.call([["halStats", hal_file, "--sequences", genome]], check_output=True)
+        # Get a list of them
+        sequences += sequences_string.strip().split(",")
     
     # TODO: we assume that these sequence names are unique in the HAL even
     # without the genome
@@ -191,7 +195,7 @@ def hal2vg_job(job, options, plan, hal_id):
         # Retain each path in the correct genome
         mod_args.append("--retain-path")
         mod_args.append(sequence_name)
-        RealtimeLogger.info("Retaining sequence {} from genome {}".format(sequence_name, options.hal_genome))
+        RealtimeLogger.info("Retaining sequence {} from genomes {}".format(sequence_name, str(options.hal_genome)))
         
     with job.fileStore.writeGlobalFileStream() as (vg_handle, vg_id):
         # Make a vg and retain only the parts involved in the requested genome.
