@@ -69,7 +69,7 @@ def parse_args(args):
     parser.add_argument("--assembly_url", default=None,
         help="root of input assembly structure in GRC format")
     parser.add_argument("--vcfs_url", default=None,
-        help="directory of VCFs per chromosome") 
+        help="directory of VCFs per chromosome")
         
     # HAL interpretation
     parser.add_argument("--hal_genome", action="append", default=[],
@@ -293,6 +293,53 @@ def hals_and_vgs_to_vg_job(job, options, plan, hal_ids, vg_ids):
         
     return merge_child.rv()
     
+def add_variants_job(job, options, plan, vg_id, vcf_ids):
+    """
+    Adds the VCF files with the given IDs into the VG file with the given ID
+    using vg add. Returns the ID of a new vg file.
+    
+    """
+    
+    if len(vcf_ids) == 0:
+        # Just spit back the graph unchanged
+        return vg_id
+    
+    # Download all the VCFs
+    vcf_filenames = []
+    for i, vcf_id in enumerate(vcf_ids):
+        # Pick a filename for each VCF
+        vcf_filename = os.path.join(job.fileStore.getLocalTempDir(),
+            "vcf{}.vcf.gz".format(i))
+        
+        # Download it
+        job.fileStore.readGlobalFile(vcf_id, vcf_filename)
+        # Download its index next to it
+        job.fileStore.readGlobalFile(plan.get_index_id(vcf_id),
+            vcf_filename + ".tbi")
+            
+        # Save the filename
+        vcf_filenames.append(vcf_filename)
+        
+        RealtimeLogger.info("Downloaded VCF {} as {}".format(vcf_id,
+            vcf_filename))
+    
+    # Download the input graph
+    vg_filename = job.fileStore.readGlobalFile(vg_id)
+    
+    # Set up a command to add the VCFs top the graph
+    vg_args = ["vg", "add", vg_filename]
+    
+    for vcf_filename in vcf_filenames:
+        vg_args.append("-v")
+        vg_args.append(vcf_filename)
+    
+    RealtimeLogger.info("Adding VCFs to vg graph...")
+    
+    with job.fileStore.writeGlobalFileStream() as (vg_handle, new_vg_id):
+        # Stream new graph to the filestore
+        options.drunner.call([vg_args], outfile=vg_handle)
+    
+    return new_vg_id
     
     
 def main_job(job, options, plan):
@@ -306,11 +353,17 @@ def main_job(job, options, plan):
         list(plan.for_each_hal()), list(plan.for_each_base_vg()),
         cores=1, memory="2G", disk="1G")
     
+    # Add a followon to add in all the VCFs
+    add_job = vg_job.addFollowOnJobFn(add_variants_job, options, plan,
+        vg_job.rv(), [v for k, v in plan.for_each_vcf_id_by_chromosome()],
+        cores=1, memory="100G", disk="100G")
+    
     # Add a followon to index it
-    xg_job = vg_job.addFollowOnJobFn(xg_index_job, options, plan, vg_job.rv())
+    xg_job = add_job.addFollowOnJobFn(xg_index_job, options, plan, add_job.rv(),
+        cores=1, memory="100G", disk="20G")
     
     # Return the graph and the index
-    return [vg_job.rv()], [xg_job.rv()]
+    return [add_job.rv()], [xg_job.rv()]
     
     
 def main(args):
