@@ -74,6 +74,10 @@ def parse_args(args):
     # HAL interpretation
     parser.add_argument("--hal_genome", action="append", default=[],
         help="extract the given genome from HAL files")
+        
+    # Contig conversion
+    parser.add_argument("--add_chr", action="store_true",
+        help="add chr prefix when converting from vcf to graph path names")
     
     # The command line arguments start with the program name, which we don't
     # want to treat as an argument for argparse. So we remove it.
@@ -326,12 +330,19 @@ def add_variants_job(job, options, plan, vg_id, vcf_ids):
     # Download the input graph
     vg_filename = job.fileStore.readGlobalFile(vg_id)
     
-    # Set up a command to add the VCFs top the graph
+    # Set up a command to add the VCFs to the graph
     vg_args = ["vg", "add", vg_filename]
     
     for vcf_filename in vcf_filenames:
         vg_args.append("-v")
         vg_args.append(vcf_filename)
+        
+        
+    if not hasattr(options, 'add_chr') or options.add_chr:
+        # Make sure to convert vcf names like "22" to UCSC-style "chr22".
+        for base_name in plan.for_each_chromosome():
+            vg_args.append("-n")
+            vg_args.append("{}=chr{}".format(base_name, base_name))
     
     RealtimeLogger.info("Adding VCFs to vg graph...")
     
