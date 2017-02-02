@@ -21,6 +21,7 @@ import re
 import shutil
 import subprocess
 import sys
+import collections
 
 import toil
 from toil.common import Toil
@@ -248,21 +249,121 @@ def merge_vgs_job(job, options, plan, vg_ids):
         # No work to do
         return vg_ids[0]
     else:
-        # Actually need to merge
-        # Grab all the graphs
-        vg_names = [job.fileStore.readGlobalFile(vg_id) for vg_id in vg_ids]
+        # Actually need to merge.
+        
+        # Grab all the graphs. Don't cache because we'll need to modify their
+        # IDs in place.
+        vg_names = [job.fileStore.readGlobalFile(vg_id, cache=False)
+            for vg_id in vg_ids]
         # Make a new filename for the merged graph
         merged_name = os.path.join(job.fileStore.getLocalTempDir(), "merged.vg")
+        
+        for vg_filename in vg_names:
+            # Make sure all the vg files are writeable
+            # Cache=False might be supposed to do it but we have to make sure.
+            os.chmod(vg_filename, 0644)
         
         # Set up a command to merge all the graphs and put them in a shared ID
         # space
         vg_args = ["vg", "ids", "-j"] + vg_names
         
+        # It modifies the files in place
+        options.drunner.call([vg_args])
+        
+        cat_args = ["cat"] + vg_names
+        
         with job.fileStore.writeGlobalFileStream() as (vg_handle, vg_id):
-            # Make a merged vg
-            options.drunner.call([vg_args], outfile=vg_handle)
+            # Make a merged vg with cat
+            options.drunner.call([cat_args], outfile=vg_handle)
             
         return vg_id
+        
+def explode_vg_job(job, options, plan, vg_id):
+    """
+    Explode the given vg file into connected component subgraphs.
+    
+    Returns a dict from subgraph ID to a list of path names present in the
+    subgraph.
+    """
+    
+    RealtimeLogger.info("Exploding graph {}".format(vg_id))
+    
+    # Download the VG file
+    vg_name = job.fileStore.readGlobalFile(vg_id)
+    
+    # Set a directory for parts
+    part_dir = job.fileStore.getLocalTempDir() + "/parts"
+    
+    # Reserve a report file
+    report_filename = job.fileStore.getLocalTempDir() + "/report.tsv"
+    
+    # Set up args for the VG explode call
+    vg_args = ["vg", "explode", vg_name, part_dir]
+    
+    # Run the call and capture the output
+    report = options.drunner.call([vg_args], outfile=open(report_filename, "w"))
+    
+    RealtimeLogger.info("Exploded and put report in {}".format(report_filename))
+    
+    # We'll populate this with the paths that live in each part
+    paths_by_part = {}
+    
+    for line in open(report_filename):
+        if line == "":
+            # Skip blank lines
+            continue
+        # Split each line on tabs
+        parts = line.split("\t")
+        
+        # Save the file (first entry) to the filestore
+        part_id = job.fileStore.writeGlobalFile(parts[0])
+        
+        # Remember that all of its paths belong to it
+        paths_by_part[part_id] = parts[1:]
+        
+        RealtimeLogger.info("Placed {} paths in part {}".format(len(parts) - 1, parts[0]))
+        
+    assert len(paths_by_part) > 0
+        
+    return paths_by_part
+        
+def add_variants_to_parts_job(job, options, plan, paths_by_part):
+    """
+    Given a dict from vg file ID to the paths in that VG file, work out the VCF
+    files for each VG file and run jobs to add their variants. Return a list of
+    vg IDs for the graphs with variants added.
+    
+    """
+    
+    # This will hold VCF IDs by the path name they apply to
+    vcfs_by_path = collections.defaultdict(list)
+    
+    for chromosome, vcf_id in plan.for_each_vcf_id_by_chromosome():
+        # Build a dict from path name to relevant VCFs
+        
+        if not hasattr(options, 'add_chr') or options.add_chr:
+            # Make sure to convert vcf names like "22" to UCSC-style "chr22".
+            chromosome = "chr" + chromosome
+            
+        vcfs_by_path[chromosome].append(vcf_id)
+    
+    # Make a list of promises for updated vg graph file IDs
+    to_return = []
+    
+    for vg_id, paths in paths_by_part.iteritems():
+        # For each VG graph
+        
+        # Grab the applicable VCFs, flattening across all paths in the VG
+        vcfs = list({vcf_id for path in paths for vcf_id in vcfs_by_path[path]})
+        
+        # Add those VCFs to this VG
+        child = job.addChildJobFn(add_variants_job, options, plan, vg_id,
+            vcfs, cores=2, memory="100G", disk="50G")
+            
+        to_return.append(child.rv())
+        
+    return to_return
+        
         
 def hals_and_vgs_to_vg_job(job, options, plan, hal_ids, vg_ids):
     """
@@ -321,6 +422,9 @@ def add_variants_job(job, options, plan, vg_id, vcf_ids):
         job.fileStore.readGlobalFile(plan.get_index_id(vcf_id),
             vcf_filename + ".tbi")
             
+        # Make sure the index is newer than the VCF
+        os.utime(vcf_filename + ".tbi", None)
+            
         # Save the filename
         vcf_filenames.append(vcf_filename)
         
@@ -363,18 +467,29 @@ def main_job(job, options, plan):
     vg_job = job.addChildJobFn(hals_and_vgs_to_vg_job, options, plan,
         list(plan.for_each_hal()), list(plan.for_each_base_vg()),
         cores=1, memory="2G", disk="1G")
-    
-    # Add a followon to add in all the VCFs
-    add_job = vg_job.addFollowOnJobFn(add_variants_job, options, plan,
-        vg_job.rv(), [v for k, v in plan.for_each_vcf_id_by_chromosome()],
+        
+    # Then split the VG up into connected components again
+    explode_job = vg_job.addFollowOnJobFn(explode_vg_job, options, plan,
+        vg_job.rv(),
+        cores=1, memory="100G", disk="100G")
+        
+    # And add all the appropriate VCFs to each
+    add_job = explode_job.addFollowOnJobFn(add_variants_to_parts_job, options,
+        plan, explode_job.rv(),
+        cores=1, memory="4G", disk="4G")
+        
+    # And then merge those VCFs together
+    merge_job = add_job.addFollowOnJobFn(merge_vgs_job, options, plan,
+        add_job.rv(),
         cores=1, memory="100G", disk="100G")
     
     # Add a followon to index it
-    xg_job = add_job.addFollowOnJobFn(xg_index_job, options, plan, add_job.rv(),
+    xg_job = merge_job.addFollowOnJobFn(xg_index_job, options, plan,
+        merge_job.rv(),
         cores=1, memory="100G", disk="20G")
     
     # Return the graph and the index
-    return [add_job.rv()], [xg_job.rv()]
+    return [merge_job.rv()], [xg_job.rv()]
     
     
 def main(args):
