@@ -54,7 +54,9 @@ def parse_args(args):
         
     parser.add_argument("--chunk_size", type=int, default=10000,
         help="size of chunks to align")
-    parser.add_argument("--batch_size", type=int, default=100,
+    parser.add_argument("--max_children", type=int, default=10,
+        help="number of bwa children to run")
+    parser.add_argument("--batch_size", type=int, default=1000,
         help="number of chunks to align at once")
     parser.add_argument("--match_threshold", type=float, default=0.95,
         help="min score for a hit as a fraction of possible score")
@@ -83,44 +85,68 @@ def run_batch(options, batch_state, matches, writer):
     Writes output to the given TsvWriter.
     """
     
-    # Make a temp file for the FASTA to align
-    temp_file = tempfile.NamedTemporaryFile(suffix=".fa", delete=False)
-    
-    for (record, offset) in batch_state:
-        # Pull out each chunk of the appropriate max size
-        chunk = record[offset : offset + options.chunk_size]
+    # Break up batches among children
+    child_batches = [[] for i in xrange(options.max_children)]
+    for i, batch in enumerate(batch_state):
+        child_batches[i % options.max_children].append(batch)
         
-        # Save to the temp file
-        Bio.SeqIO.write(chunk, temp_file, "fasta")
-        
-    temp_file.close()
+    # This holds the child subprocesses
+    children = []
     
-    # Make the BWA command line
-    bwasw_cmd = Bio.Sequencing.Applications.BwaBwaswCommandline(
-        reference=options.ref_name, read_file=temp_file.name)
+    # This holds the temp files to clean up
+    temp_files = []
     
-    # Run it
-    child = subprocess.Popen(shlex.split(str(bwasw_cmd)), stdout=subprocess.PIPE)
+    for child_batch_state in child_batches:
     
-    # Read the SAM file
-    alignment_file = pysam.AlignmentFile(child.stdout)
-    
-    for read in alignment_file.fetch(until_eof=True):
-        # For each read, get its contig and score
-        score = dict(read.get_tags())["AS"]
-        contig = read.reference_name
+        # Make a temp file for the FASTA to align
+        temp_file = tempfile.NamedTemporaryFile(suffix=".fa", delete=False)
+        temp_files.append(temp_file)
         
-        if options.debug:
-            # Report details on the match
-            writer.comment("{} -> {}: {}".format(record.id, contig, score))
+        for (record, offset) in child_batch_state:
+            # Pull out each chunk of the appropriate max size
+            chunk = record[offset : offset + options.chunk_size]
+            
+            # Save to the temp file
+            Bio.SeqIO.write(chunk, temp_file, "fasta")
+            
+        temp_file.close()
         
-        if score > len(read.query_sequence) * options.match_threshold:
-            # Call it a good enough match
-            matches[read.query_name].add(contig)
+        # Make the BWA command line
+        bwa_cmd = Bio.Sequencing.Applications.BwaBwaswCommandline(
+            reference=options.ref_name, read_file=temp_file.name)
         
-    alignment_file.close()
-    child.wait()
-    os.unlink(temp_file.name)
+        # Run it
+        child = subprocess.Popen(shlex.split(str(bwa_cmd)), stdout=subprocess.PIPE)
+        children.append(child)
+        
+    for child in children:
+        # Now handle all the children one at a time  
+        
+        # Read the SAM file
+        alignment_file = pysam.AlignmentFile(child.stdout)
+        
+        for read in alignment_file.fetch(until_eof=True):
+            # For each read, get its contig and score
+            score = dict(read.get_tags())["AS"]
+            contig = read.reference_name
+            
+            threshold_score = len(read.query_sequence) * options.match_threshold
+            
+            if options.debug:
+                # Report details on the match
+                writer.comment("{} -> {}: {}/{}".format(read.query_name, contig,
+                    score, threshold_score))
+            
+            if score >= threshold_score:
+                # Call it a good enough match
+                matches[read.query_name].add(contig)
+        
+        alignment_file.close()
+        child.wait()
+        
+    for temp_file in temp_files:
+        # Clean up temp files
+        os.unlink(temp_file.name)
     
     # Now update the state
     new_batch_state = []
@@ -142,7 +168,7 @@ def run_batch(options, batch_state, matches, writer):
                 
             else:
                 # No hits before end of contig
-                sys.stderr.write_line("Record {} has no hits".format(
+                writer.comment("Record {} has no hits".format(
                     record.id))
     return new_batch_state
    
