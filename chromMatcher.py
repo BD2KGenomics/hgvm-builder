@@ -54,6 +54,8 @@ def parse_args(args):
         
     parser.add_argument("--chunk_size", type=int, default=10000,
         help="size of chunks to align")
+    parser.add_argument("--batch_size", type=int, default=100,
+        help="number of chunks to align at once")
     parser.add_argument("--match_threshold", type=float, default=0.95,
         help="min score for a hit as a fraction of possible score")
     parser.add_argument("--out_file", type=argparse.FileType("w"),
@@ -67,6 +69,82 @@ def parse_args(args):
     args = args[1:]
         
     return parser.parse_args(args)
+    
+    
+def run_batch(options, batch_state, matches, writer):
+    """
+    Takes a list of (SeqRecord, offset) pairs and a defaultdict form sequence ID
+    to set of hits.
+    
+    Run a batch with the latest piece form every state. Throw out the states
+    that finish. Returns the updated list of (SeqRecord, new offset) pairs for
+    records that still have no hits.
+    
+    Writes output to the given TsvWriter.
+    """
+    
+    # Make a temp file for the FASTA to align
+    temp_file = tempfile.NamedTemporaryFile(suffix=".fa", delete=False)
+    
+    for (record, offset) in batch_state:
+        # Pull out each chunk of the appropriate max size
+        chunk = record[offset : offset + options.chunk_size]
+        
+        # Save to the temp file
+        Bio.SeqIO.write(chunk, temp_file, "fasta")
+        
+    temp_file.close()
+    
+    # Make the BWA command line
+    bwasw_cmd = Bio.Sequencing.Applications.BwaBwaswCommandline(
+        reference=options.ref_name, read_file=temp_file.name)
+    
+    # Run it
+    child = subprocess.Popen(shlex.split(str(bwasw_cmd)), stdout=subprocess.PIPE)
+    
+    # Read the SAM file
+    alignment_file = pysam.AlignmentFile(child.stdout)
+    
+    for read in alignment_file.fetch(until_eof=True):
+        # For each read, get its contig and score
+        score = dict(read.get_tags())["AS"]
+        contig = read.reference_name
+        
+        if options.debug:
+            # Report details on the match
+            writer.comment("{} -> {}: {}".format(record.id, contig, score))
+        
+        if score > len(read.query_sequence) * options.match_threshold:
+            # Call it a good enough match
+            matches[read.query_name].add(contig)
+        
+    alignment_file.close()
+    child.wait()
+    os.unlink(temp_file.name)
+    
+    # Now update the state
+    new_batch_state = []
+    for (record, offset) in batch_state:
+        if len(matches[record.id]) > 0:
+            # We have a hit for this record, so we don't need to run it any
+            # more
+            for ref_contig in matches[record.id]:
+                # Say each mapping of query contig to ref contig that we
+                # found
+                writer.line(record.id, ref_contig)
+        else:
+            # No hits, so we need to keep it
+            # Where will we align next?
+            new_offset = offset + options.chunk_size
+            
+            if new_offset < len(record.seq):
+                new_batch_state.append((record, new_offset))
+                
+            else:
+                # No hits before end of contig
+                sys.stderr.write_line("Record {} has no hits".format(
+                    record.id))
+    return new_batch_state
    
 def main(args):
     """
@@ -79,61 +157,28 @@ def main(args):
     
     writer = tsv.TsvWriter(options.out_file)
     
+    # We use this to keep our state: pairs of SeqRecord and current offset
+    batch_state = []
+    
+    # We use this to keep track of the matches found for each query sequence ID
+    matches = collections.defaultdict(set)
+    
+    # OK so we need to run that update function a bunch and feed in data
+    
     for record in Bio.SeqIO.parse(options.query_name, "fasta"):
         # For each record to place
         
-        # Where do we put it
-        hit_contigs = set()
+        while len(batch_state) >= options.batch_size:
+            # Run through existing batches until there's room
+            batch_state = run_batch(options, batch_state, matches, writer)
+            
+        # Start a new fake thread on this record
+        batch_state.append((record, 0))
         
-        for chunk_start in xrange(0, len(record.seq), options.chunk_size):
-            # Pull out each chunk of the appropriate max size
-            chunk = record[chunk_start : chunk_start + options.chunk_size]
-            
-            # Make a temp file for it
-            temp_file = tempfile.NamedTemporaryFile(suffix=".fa", delete=False)
-            
-            # Save to the temp file
-            Bio.SeqIO.write(chunk, temp_file, "fasta")
-            temp_file.close()
-            
-            # Make the BWA command line
-            bwasw_cmd = Bio.Sequencing.Applications.BwaBwaswCommandline(
-                reference=options.ref_name, read_file=temp_file.name)
-            
-            # Run it
-            child = subprocess.Popen(shlex.split(str(bwasw_cmd)), stdout=subprocess.PIPE)
-            
-            # Read the SAM file
-            alignment_file = pysam.AlignmentFile(child.stdout)
-            
-            for read in alignment_file.fetch(until_eof=True):
-                # For each read, get its contig and score
-                score = dict(read.get_tags())["AS"]
-                contig = read.reference_name
-                
-                if options.debug:
-                    # Report details on the match
-                    writer.comment("{}@{} -> {}: {}".format(record.id,
-                        chunk_start, contig, score))
-                
-                if score > len(read.query_sequence) * options.match_threshold:
-                    # Call it a good enough match
-                    hit_contigs.add(contig)
-                
-            alignment_file.close()
-            child.wait()
-            
-            os.unlink(temp_file.name)
-            
-            if len(hit_contigs) > 0:
-                # Only go until the first good hit. Tehn move on to the next
-                # record
-                break
-                
-        for ref_contig in hit_contigs:
-            # Say each mapping of query contig to ref contig that we found
-            writer.line(record.id, ref_contig)
-    
+    # Now run all the records to completion
+    while len(batch_state) > 0:
+        batch_state = run_batch(options, batch_state, matches, writer)
+        
     return 0
     
 def entrypoint():
