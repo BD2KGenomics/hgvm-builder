@@ -448,7 +448,8 @@ def add_variants_job(job, options, plan, vg_id, vcf_ids):
             vg_args.append("-n")
             vg_args.append("{}=chr{}".format(base_name, base_name))
     
-    RealtimeLogger.info("Adding VCFs to vg graph...")
+    RealtimeLogger.info("Adding {} VCFs to vg graph...".format(
+        len(vcf_filenames)))
     
     with job.fileStore.writeGlobalFileStream() as (vg_handle, new_vg_id):
         # Stream new graph to the filestore
