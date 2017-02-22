@@ -69,8 +69,8 @@ def parse_args(args):
         help="start with this VG file instead of converting from HAL")
     parser.add_argument("--assembly_url", default=None,
         help="root of input assembly structure in GRC format")
-    parser.add_argument("--vcfs_url", default=None,
-        help="directory of VCFs per chromosome")
+    parser.add_argument("--vcfs_url", action="append", default=[],
+        help="directory of VCFs per chromosome (may repeat)")
         
     # HAL interpretation
     parser.add_argument("--hal_genome", action="append", default=[],
@@ -86,7 +86,7 @@ def parse_args(args):
         
     return parser.parse_args(args)
    
-def create_plan(assembly_url, vcfs_url, hal_url, base_vg_url):
+def create_plan(assembly_url, vcfs_urls, hal_url, base_vg_url):
     """
     Given an FTP or file url to the root of a GRC-format assembly_structure
     directory tree, and an FTP or file URL to a directory of chrXXX VCFs,
@@ -100,8 +100,8 @@ def create_plan(assembly_url, vcfs_url, hal_url, base_vg_url):
         # Parse the assembly and populate the plan    
         grcparser.parse(plan, assembly_url)
     
-    if vcfs_url is not None:
-        # Parse the VCF directory and add the VCFs
+    for vcfs_url in vcfs_urls:
+        # Parse each VCF directory and add the VCFs
         thousandgenomesparser.parse(plan, vcfs_url)
     
     if hal_url is not None:

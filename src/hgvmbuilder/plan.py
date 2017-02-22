@@ -2,6 +2,7 @@
 
 import logging
 import urllib2
+import collections
 
 import tsv
 
@@ -48,10 +49,10 @@ class ReferencePlan(object):
         self.alt_fasta_urls = []
         # This holds a list of alt scaffold placement database file URLs
         self.alt_placement_urls = []
-        # This holds a dict from chromosome name/number to relevant VCF URL.
-        self.vcf_urls = {}
-        # This holds a dict from chromosome name/number to relevant VCF index
-        # URL.
+        # This holds a dict from chromosome name/number to a list of relevant
+        # VCF URLs.
+        self.vcf_urls = collections.defaultdict(list)
+        # This holds a dict from VCF URL to VCF index URL
         self.vcf_index_urls = {}
         
         # After we load all the databases and import all the input files into
@@ -65,9 +66,9 @@ class ReferencePlan(object):
         self.accession_to_name = {}
         # This does the reverse
         self.name_to_accession = {}
-        # This dict maps from chromosome name to a Toil file ID for the VCF for
-        # that chromosome, if any.
-        self.vcf_ids = {}
+        # This dict maps from chromosome name to a list of Toil file IDs for the
+        # VCFs for that chromosome, if any.
+        self.vcf_ids = collections.defaultdict(list)
         # This holds the list of raw, possibly compressed FASTA file IDs for
         # FASTAs with primary sequences.
         self.primary_ids = []
@@ -184,33 +185,25 @@ class ReferencePlan(object):
     def add_variants(self, chromosome_name, url): 
         """
         Adds the gzipped VCF at the given URL as variants to be applied to the
-        given chromosome number or X/Y/MT name. Only one VCF is allowed per
-        chromosome.
+        given chromosome number or X/Y/MT name.
         """
         
-        if self.vcf_urls.has_key(chromosome_name):
-            # We already have a VCF for this chromosome
-            raise RuntimeError(
-                "Duplicate chromosome name {} adding VCF {} to plan".format(
-                chromosome_name, url))
-                
-        self.vcf_urls[chromosome_name] = url
+        self.vcf_urls[chromosome_name].append(url)
         
-    def add_variants_index(self, chromosome_name, url): 
+    def add_variants_index(self, url): 
         """
         Adds the .tbi index at the given URL as the index of variants to be
-        applied to the given chromosome number or X/Y/MT name. Only one index is
-        allowed per chromosome. The index may be added before or after the VCF
-        itself.
+        applied. Only one index is allowed per VCF, and the index URL must be
+        the URL of the VCF with ".tbi" appended. The index may be added before
+        or after the VCF itself.
         """
         
-        if self.vcf_index_urls.has_key(chromosome_name):
-            # We already have an index for this chromosome
-            raise RuntimeError(
-                "Duplicate chromosome name {} adding index {} to plan".format(
-                chromosome_name, url))
-                
-        self.vcf_index_urls[chromosome_name] = url
+        if not url.lower().endswith(".tbi"):
+            # Make sure the last 4 characters are what we expect
+            raise RuntimeError("Index does not appear to be Tabix: " + url)        
+        
+        # Drop the last 4 characters to get the VCF name
+        self.vcf_index_urls[url[:-4]] = url
         
     def add_sample(self, fastq_url):
         """
@@ -252,10 +245,14 @@ class ReferencePlan(object):
             
     def for_each_vcf_id_by_chromosome(self):
         """
-        Iterate through (chromosome name, VCF file ID) pairs.
+        Iterate through (chromosome name, VCF file ID) pairs. Each chromosome
+        can appear multiple times.
         """
         
-        return self.vcf_ids.iteritems()
+        for (chromosome, vcfs) in self.vcf_ids.iteritems():
+            for vcf in vcfs:
+                # Pair each chromosome with each of its VCF file IDs
+                yield (chromosome, vcf)
         
     def for_each_chromosome(self):
         """
@@ -264,10 +261,10 @@ class ReferencePlan(object):
         
         return self.vcf_ids.iterkeys()
         
-    def get_vcf_id(self, chrom_name):
+    def get_vcf_ids(self, chrom_name):
         """
-        Get the VCF file ID for the given chromosome name. Throws an error
-        if it can't be found.
+        Get the VCF file IDs for the given chromosome name, or [] if no VCFs are
+        associated with a name.
         """
         
         return self.vcf_ids[chrom_name]
@@ -320,29 +317,22 @@ class ReferencePlan(object):
                 imported_id))
             self.alt_ids.append(imported_id)
             
-        for chrom_name, vcf_url in self.vcf_urls.iteritems():
+        for chrom_name, urls in self.vcf_urls.iteritems():
             # Import all the VCFs
             
-            if not self.vcf_index_urls.has_key(chrom_name):
-                raise RuntimeError("VCF but no index found for {}".format(
-                    chrom_name))
-            
-            imported_id = import_function(vcf_url)
-            Logger.info("Imported VCF {} as {}".format(vcf_url, imported_id))
-            self.vcf_ids[chrom_name] = imported_id
-            
-        for chrom_name, vcf_index_url in self.vcf_index_urls.iteritems():
-            # Import all the VCF indexes
-            
-            if not self.vcf_urls.has_key(chrom_name):
-                raise RuntimeError("Index but no VCF found for {}".format(
-                    chrom_name))
-            
-            imported_id = import_function(vcf_index_url)
-            Logger.info("Imported index {} as {}".format(vcf_index_url,
-                imported_id))
-            # Remember that this is the index for that VCF
-            self.index_ids[self.vcf_ids[chrom_name]] = imported_id
+            for vcf_url in urls:
+                imported_id = import_function(vcf_url)
+                Logger.info("Imported VCF {} as {}".format(vcf_url, imported_id))
+                self.vcf_ids[chrom_name].append(imported_id)
+                
+                if self.vcf_index_urls.has_key(vcf_url):
+                    # There's also an index
+                    vcf_index_url = self.vcf_index_urls[vcf_url]
+                    index_id = import_function(vcf_index_url)
+                    Logger.info("Imported index {} as {}".format(vcf_index_url,
+                        index_id))
+                    # Remember that this is the index for that VCF
+                    self.index_ids[imported_id] = index_id
             
         for hal_url in self.hal_urls:
             # Import all the HALs

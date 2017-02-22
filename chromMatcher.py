@@ -54,6 +54,8 @@ def parse_args(args):
         
     parser.add_argument("--chunk_size", type=int, default=10000,
         help="size of chunks to align")
+    parser.add_argument("--chunk_stride", type=int, default=100000,
+        help="distabnce between chunks to align")
     parser.add_argument("--max_children", type=int, default=10,
         help="number of bwa children to run")
     parser.add_argument("--batch_size", type=int, default=1000,
@@ -126,8 +128,14 @@ def run_batch(options, batch_state, matches, writer):
         alignment_file = pysam.AlignmentFile(child.stdout)
         
         for read in alignment_file.fetch(until_eof=True):
-            # For each read, get its contig and score
-            score = dict(read.get_tags())["AS"]
+            # For each read
+            
+            if read.reference_id == -1:
+                # Some reads have broken contig assignments for some reason
+                continue
+            
+            # Get its contig and score
+            score = dict(read.get_tags()).get("AS", 0)
             contig = read.reference_name
             
             threshold_score = len(read.query_sequence) * options.match_threshold
@@ -161,7 +169,7 @@ def run_batch(options, batch_state, matches, writer):
         else:
             # No hits, so we need to keep it
             # Where will we align next?
-            new_offset = offset + options.chunk_size
+            new_offset = offset + options.chunk_stride
             
             if new_offset < len(record.seq):
                 new_batch_state.append((record, new_offset))

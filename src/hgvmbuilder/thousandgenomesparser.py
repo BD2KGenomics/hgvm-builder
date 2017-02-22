@@ -45,8 +45,8 @@ def parse(plan, vcf_root):
                 # It's an index
                 Logger.info("Chromosome {} index: {}".format(name, item))
                 
-                # Add the VCF to the plan
-                plan.add_variants_index(name, connection.get_url(item))
+                # Add the index to the plan
+                plan.add_variants_index(connection.get_url(item))
                 
             else:
                 # It's a VCF
