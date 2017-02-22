@@ -234,6 +234,32 @@ def xg_index_job(job, options, plan, vg_id):
     # Upload the file
     return job.fileStore.writeGlobalFile(xg_name)
     
+def gcsa_index_job(job, options, plan, vg_id):
+    """
+    Index the given VG graph into a GCSA2/LCP file pair. Returns the IDs of the
+    .gcsa and .lcp files in a pair.
+    """
+    
+    # Download the VG file
+    vg_name = job.fileStore.readGlobalFile(vg_id)
+    
+    # Make a GCSA name
+    gcsa_name = os.path.join(job.fileStore.getLocalTempDir(), "index.gcsa")
+    # Find the LCP name
+    lcp_name = gcsa_name + ".lcp"
+    
+    # Set up args for the VG call
+    # TODO: don't hardcode options
+    vg_args = ["vg", "index", "-g", gcsa_name,
+        "-k", "8", "-e", "2", "-X", "2", "--size-limit", "500", vg_name]
+    
+    # Run the call
+    options.drunner.call([vg_args])
+    
+    # Upload the files
+    return (job.fileStore.writeGlobalFile(gcsa_name),
+        job.fileStore.writeGlobalFile(lcp_name))
+    
 def merge_vgs_job(job, options, plan, vg_ids):
     """
     Merge the given VG graphs into one VG graph. Returns the ID of the merged VG
@@ -460,8 +486,8 @@ def add_variants_job(job, options, plan, vg_id, vcf_ids):
     
 def main_job(job, options, plan):
     """
-    Root Toil job. Returns a pair of lists of a VG file IDs and XG index file
-    IDs.
+    Root Toil job. Returns a tripple of lists of a VG file IDs, XG index file
+    IDs, and GCSA/LCP file ID pairs.
     """
     
     # Make a child to convert the HALs and merge the VGs
@@ -484,13 +510,18 @@ def main_job(job, options, plan):
         add_job.rv(),
         cores=1, memory="100G", disk="100G")
     
-    # Add a followon to index it
+    # Add a followon to XG-index it
     xg_job = merge_job.addFollowOnJobFn(xg_index_job, options, plan,
         merge_job.rv(),
         cores=1, memory="100G", disk="20G")
     
+    # And another to GCSA-index it
+    gcsa_job = merge_job.addFollowOnJobFn(gcsa_index_job, options, plan,
+        merge_job.rv(),
+        cores=16, memory="100G", disk="500G")
+    
     # Return the graph and the index
-    return [merge_job.rv()], [xg_job.rv()]
+    return [merge_job.rv()], [xg_job.rv()], [gcsa_job.rv()]
     
     
 def main(args):
@@ -543,14 +574,19 @@ def main(args):
                 cores=1, memory="1G", disk="1G")
             
             # Run the root job and get one or more IDs for vg graphs, in a list
-            graph_ids, index_ids = toil_instance.start(root_job)
+            graph_ids, xg_ids, gcsa_ids = toil_instance.start(root_job)
         
         for i, graph_id in enumerate(graph_ids):
             # Export all the graphs as VG files in arbitrary order
             toil_instance.exportFile(graph_id, "file:./part{}.vg".format(i))
-        for i, index_id in enumerate(index_ids):
-            # Export all the graph indexes as XG files in the same order
+        for i, index_id in enumerate(xg_ids):
+            # Export all the graph XG indexes as XG files in the same order
             toil_instance.exportFile(index_id, "file:./part{}.xg".format(i))
+        for i, (gcsa_id, lcp_id) in enumerate(gcsa_ids):
+            # Export all the graph GCSA indexes as GCSA/LCP files in the same
+            # order
+            toil_instance.exportFile(gcsa_id, "file:./part{}.gcsa".format(i))
+            toil_instance.exportFile(lcp_id, "file:./part{}.gcsa.lcp".format(i))
         
     print("Toil workflow complete")
     return 0
