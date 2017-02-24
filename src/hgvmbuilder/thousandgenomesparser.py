@@ -28,9 +28,8 @@ def parse(plan, vcf_root):
     for item in connection.list_children(""):
         # For each file that might be a VCF
         
-        # TODO: for now we only take gzipped VCFs, because VG requires VCFs to
-        # be indexed, and we have no indexing code.
-        if ((not item.endswith(".vcf.gz")) and
+        if ((not item.endswith(".vcf")) and
+            (not item.endswith(".vcf.gz")) and
             (not item.endswith(".vcf.gz.tbi"))):
             # Not a VCF or index
             continue

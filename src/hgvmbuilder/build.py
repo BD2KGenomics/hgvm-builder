@@ -202,17 +202,23 @@ def hal2vg_job(job, options, plan, hal_id):
         mod_args.append(sequence_name)
         RealtimeLogger.info("Retaining sequence {} from genomes {}".format(sequence_name, str(options.hal_genome)))
         
-    with job.fileStore.writeGlobalFileStream() as (vg_handle, vg_id):
-        # Make a vg and retain only the parts involved in the requested genome.
-        # Also sort it so IDs will start at 1 again.
-        # Save directly into the file store.
-        options.drunner.call([["hal2vg", hal_file, "--chop", "1000000", "--inMemory", "--onlySequenceNames"],
-            mod_args,
-            ["vg", "ids", "-s", "-"]], outfile=vg_handle)
-            
-        RealtimeLogger.info("Created VG graph {}".format(vg_id))
-            
-        return vg_id
+    # Convert into a local file
+    vg_filename = os.path.join(job.fileStore.getLocalTempDir(), "from_hal.vg")
+    
+    # Make a vg and retain only the parts involved in the requested genome.
+    # Also sort it so IDs will start at 1 again.
+    options.drunner.call([["hal2vg", hal_file, "--chop", "1000000", "--inMemory", "--onlySequenceNames"],
+        mod_args,
+        ["vg", "ids", "-s", "-"]], outfile=open(vg_filename, "w"))
+        
+    # Validate the resulting graph
+    options.drunner.call([["vg", "validate", parts[0]]])
+    
+    # Upload it
+    vg_id = job.fileStore.writeGlobalFile(vg_filename)
+        
+    RealtimeLogger.info("Created VG graph {}".format(vg_id))
+    return vg_id
         
 def xg_index_job(job, options, plan, vg_id):
     """
@@ -341,6 +347,9 @@ def explode_vg_job(job, options, plan, vg_id):
         # Split each line on tabs
         parts = line.split("\t")
         
+        # Validate the part
+        options.drunner.call([["vg", "validate", parts[0]]])
+        
         # Save the file (first entry) to the filestore
         part_id = job.fileStore.writeGlobalFile(parts[0])
         
@@ -438,18 +447,28 @@ def add_variants_job(job, options, plan, vg_id, vcf_ids):
     # Download all the VCFs
     vcf_filenames = []
     for i, vcf_id in enumerate(vcf_ids):
-        # Pick a filename for each VCF
-        vcf_filename = os.path.join(job.fileStore.getLocalTempDir(),
-            "vcf{}.vcf.gz".format(i))
+        # We need to download each VCF
         
-        # Download it
-        job.fileStore.readGlobalFile(vcf_id, vcf_filename)
-        # Download its index next to it
-        job.fileStore.readGlobalFile(plan.get_index_id(vcf_id),
-            vcf_filename + ".tbi")
+        if plan.get_index_id(vcf_id) is not None:
+            # This VCF is indexed, so it must be gzipped
             
-        # Make sure the index is newer than the VCF
-        os.utime(vcf_filename + ".tbi", None)
+            # Download the VCF under a .gz name
+            vcf_filename = os.path.join(job.fileStore.getLocalTempDir(),
+            "vcf{}.vcf.gz".format(i))
+            job.fileStore.readGlobalFile(vcf_id, vcf_filename)
+            
+            # Download its index next to it
+            job.fileStore.readGlobalFile(plan.get_index_id(vcf_id),
+                vcf_filename + ".tbi")
+            
+            # Make sure the index is newer than the VCF
+            os.utime(vcf_filename + ".tbi", None)
+            
+        else:
+            # If it's not indexed, assume it's not compressed either.
+            vcf_filename = os.path.join(job.fileStore.getLocalTempDir(),
+            "vcf{}.vcf".format(i))
+            job.fileStore.readGlobalFile(vcf_id, vcf_filename)
             
         # Save the filename
         vcf_filenames.append(vcf_filename)
@@ -459,6 +478,9 @@ def add_variants_job(job, options, plan, vg_id, vcf_ids):
     
     # Download the input graph
     vg_filename = job.fileStore.readGlobalFile(vg_id)
+    
+    # Validate it
+    options.drunner.call([["vg", "validate", vg_filename]])
     
     # Set up a command to add the VCFs to the graph
     vg_args = ["vg", "add", vg_filename]

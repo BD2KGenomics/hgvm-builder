@@ -275,7 +275,7 @@ class ReferencePlan(object):
         file.
         """
         
-        return self.index_ids[file_id]
+        return self.index_ids.get(file_id, None)
         
     def bake(self, import_function):
         """
