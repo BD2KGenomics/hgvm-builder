@@ -13,7 +13,7 @@ class ReferencePlan(object):
     Represents a plan to build a graph reference, or (Human) Genome Variation
     Map.
     
-    Consists of a set of a base graph in VG or HAL format and some variants to
+    Consists of a set of base graphs in VG or HAL format and some variants to
     apply (and the assembly used to interpret those variants).
     
     Also keeps track of what VCF contigs/chromosomes map to what graph-space

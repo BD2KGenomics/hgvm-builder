@@ -8,8 +8,7 @@ unlocalized/poorly localized scaffonds) including the variation from the VCF.
 
 Parallelizes using the Toil system.
 
-Requires the "vg" binary to be available on the PATH on all nodes, or provided
-in a static build usable by all Toil nodes at a URL.
+Requires the "vg" binary to be available on the PATH on all nodes.
 
 """
 
@@ -63,6 +62,7 @@ def parse_args(args):
         help="If specified, restrict to a single chromosome (like \"22\")")
     
     # Data sources
+    # For construction
     parser.add_argument("--hal_url", default=None,
         help="start with the given HAL file and convert it to vg")
     parser.add_argument("--base_vg_url", default=None,
@@ -71,6 +71,20 @@ def parse_args(args):
         help="root of input assembly structure in GRC format")
     parser.add_argument("--vcfs_url", action="append", default=[],
         help="directory of VCFs per chromosome (may repeat)")
+    # For evaluation
+    parser.add_argument("--control_graph", default=None,
+        help="use the given vg file as a control")
+    parser.add_argument("--control_graph_xg", default=None,
+        help="use the given xg index for the control graph")
+    parser.add_argument("--control_graph_gcsa", default=None,
+        help="use the given gcsa/lcp index for the control graph")
+    parser.add_argument("--eval_fq1", default=None,
+        help="end 1 FASTQ file of evaluation reads")
+    parser.add_argument("--eval_fq2", default=None,
+        help="end 2 FASTQ file of evaluation reads") 
+    parser.add_argument("--eval_sequences", default=None,
+        help="sequences to align to the sample graph, one sequence per line")
+        
         
     # HAL interpretation
     parser.add_argument("--hal_genome", action="append", default=[],
@@ -79,6 +93,10 @@ def parse_args(args):
     # Contig conversion
     parser.add_argument("--add_chr", action="store_true",
         help="add chr prefix when converting from vcf to graph path names")
+        
+    # Output
+    parser.add_argument("out_dir",
+        help="directory to place the constructed graph parts in")
     
     # The command line arguments start with the program name, which we don't
     # want to treat as an argument for argparse. So we remove it.
@@ -177,6 +195,9 @@ def hal2vg_job(job, options, plan, hal_id):
     
     """
     
+    # We need to want a HAL genome to use a HAL
+    assert(len(options.hal_genome) > 0)
+    
     # Download the HAL
     hal_file = job.fileStore.readGlobalFile(hal_id)
     
@@ -185,34 +206,22 @@ def hal2vg_job(job, options, plan, hal_id):
     # Find all the sequences we want
     sequences = []
     
-    for genome in options.hal_genome:
-        # Find all the sequences in the genome we want
-        sequences_string = options.drunner.call([["halStats", hal_file, "--sequences", genome]], check_output=True)
-        # Get a list of them
-        sequences += sequences_string.strip().split(",")
-    
-    # TODO: we assume that these sequence names are unique in the HAL even
-    # without the genome
-    
-    # Build a command to keep only the given paths in a vg file, and also chop
-    mod_args = ["vg", "mod", "-", "--remove-non-path", "--chop", "100"]
-    for sequence_name in sequences:
-        # Retain each path in the correct genome
-        mod_args.append("--retain-path")
-        mod_args.append(sequence_name)
-        RealtimeLogger.info("Retaining sequence {} from genomes {}".format(sequence_name, str(options.hal_genome)))
-        
     # Convert into a local file
     vg_filename = os.path.join(job.fileStore.getLocalTempDir(), "from_hal.vg")
     
-    # Make a vg and retain only the parts involved in the requested genome.
-    # Also sort it so IDs will start at 1 again.
-    options.drunner.call([["hal2vg", hal_file, "--chop", "1000000", "--inMemory", "--onlySequenceNames"],
-        mod_args,
+    # Pull out only the requested genomes, and sort so IDs start at 1 and are
+    # nice.
+    options.drunner.call([["hal2vg", hal_file,
+        "--inMemory",
+        "--onlySequenceNames",
+        "--targetGenomes", ",".join(options.hal_genome),
+        "--refGenome", options.hal_genome[0],
+        "--noAncestors"],
+        ["vg", "mod", "-", "--chop", "100"],
         ["vg", "ids", "-s", "-"]], outfile=open(vg_filename, "w"))
         
     # Validate the resulting graph
-    options.drunner.call([["vg", "validate", parts[0]]])
+    options.drunner.call([["vg", "validate", vg_filename]])
     
     # Upload it
     vg_id = job.fileStore.writeGlobalFile(vg_filename)
@@ -415,12 +424,14 @@ def hals_and_vgs_to_vg_job(job, options, plan, hal_ids, vg_ids):
     # Remember all the child jobs that make them
     hal_children = []
     
-    for hal_id in hal_ids:
-        # Make a child to convert each HAL to VG
-        child = job.addChildJobFn(hal2vg_job, options, plan, hal_id,
-            cores=1, memory="100G", disk="5G")
-        converted_vgs.append(child.rv())
-        hal_children.append(child)
+    if len(options.hal_genome) > 0:
+        # We want something from the HALs
+        for hal_id in hal_ids:
+            # Make a child to convert each HAL to VG
+            child = job.addChildJobFn(hal2vg_job, options, plan, hal_id,
+                cores=1, memory="100G", disk="5G")
+            converted_vgs.append(child.rv())
+            hal_children.append(child)
         
     RealtimeLogger.info("Converting {} HALs".format(len(hal_children)))
 
@@ -597,18 +608,29 @@ def main(args):
             
             # Run the root job and get one or more IDs for vg graphs, in a list
             graph_ids, xg_ids, gcsa_ids = toil_instance.start(root_job)
+            
+        try:
+            # Make sure the output directory exists
+            os.mkdirs(options.out_dir)
+        except OSError:
+            # It may exist already
+            pass
         
         for i, graph_id in enumerate(graph_ids):
             # Export all the graphs as VG files in arbitrary order
-            toil_instance.exportFile(graph_id, "file:./part{}.vg".format(i))
+            toil_instance.exportFile(graph_id, "file:{}/part{}.vg".format(
+                options.out_dir, i))
         for i, index_id in enumerate(xg_ids):
             # Export all the graph XG indexes as XG files in the same order
-            toil_instance.exportFile(index_id, "file:./part{}.xg".format(i))
+            toil_instance.exportFile(index_id, "file:{}/part{}.xg".format(
+                options.out_dir, i))
         for i, (gcsa_id, lcp_id) in enumerate(gcsa_ids):
             # Export all the graph GCSA indexes as GCSA/LCP files in the same
             # order
-            toil_instance.exportFile(gcsa_id, "file:./part{}.gcsa".format(i))
-            toil_instance.exportFile(lcp_id, "file:./part{}.gcsa.lcp".format(i))
+            toil_instance.exportFile(gcsa_id, "file:{}/part{}.gcsa".format(
+                options.out_dir, i))
+            toil_instance.exportFile(lcp_id, "file:{}/part{}.gcsa.lcp".format(
+                options.out_dir, i))
         
     print("Toil workflow complete")
     return 0
