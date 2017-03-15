@@ -365,6 +365,22 @@ def merge_vgs_job(job, options, plan, vg_ids):
             
         return vg_id
         
+        
+def merge_directories_job(job, directories):
+    """
+    Merge a list of Directories into one Directory with all the files.
+    """
+    
+    merged = Directory()
+    
+    for other in directories:
+        for file_name, file_id in other.for_each_file():
+            # Toil did the hard work of resolving the promises so just copy
+            # everything over.
+            merged.add(file_name, file_id)
+            
+    return merged
+        
 def explode_vg_job(job, options, plan, vg_id):
     """
     Explode the given vg file into connected component subgraphs.
@@ -584,8 +600,6 @@ def hgvm_package_job(job, options, plan, vg_id, xg_id, gcsa_pair):
     
     return hgvm
     
-    
-    
 def hgvm_build_job(job, options, plan):
     """
     Toil job for building the HGVM. Returns a Directory object holding
@@ -634,6 +648,107 @@ def hgvm_build_job(job, options, plan):
     # Return the Directory with the packaged HGVM
     return directory_job.rv()
     
+def align_to_hgvm_job(job, options, eval_plan, hgvm, fastqs=[], sequences=None):
+    """
+    Align either a single or a pair of paired FASTQs, or a file of sequences,
+    one per line, to an HGVM represented as a Directory.
+    
+    Return the GAM file ID.
+    """
+    
+    # Download the HGVM
+    hgvm_dir = job.fileStore.getLocalTempDir()
+    hgvm.download(job.fileStore, hgvm_dir)
+    
+    # Prepare some args to align to the HGVM
+    vg_args = ["vg", "map", "-x", os.path.join(hgvm_dir, "hgvm.xg"),
+        "-g", os.path.join(hgvm_dir, "hgvm.gcsa")]
+        
+    for fastq_id in fastqs:
+        # Download and point at all the FASTQs
+        fastq_filename = job.fileStore.readGlobalFile(fastq_id)
+        vg_args.append("--fastq")
+        vg_args.append(fastq_filename)
+        
+    if sequences is not None:
+        # Download and point to the sequences file
+        sequences_filename = job.fileStore.readGlobalFile(sequences)
+        vg_args.append("--reads")
+        vg_args.append(sequences_filename)
+    
+    # TODO: configure multimapping and stuff
+    
+    with job.fileStore.writeGlobalFileStream() as (gam_handle, gam_id):
+        # Align and stream GAM to the filestore
+        options.drunner.call([vg_args], outfile=gam_handle)
+    
+    return gam_id
+    
+def pileup_on_hgvm_job(job, options, eval_plan, hgvm, gam_id):
+    """
+    Pile up the given GAM file on the given packaged HGVM. Returns the pileup
+    file ID.
+    
+    """
+
+    # Download just the vg
+    vg_filename = job.fileStore.readGlobalFile(hgvm.get("hgvm.vg"))
+    
+    # Download the GAM
+    gam_filename = job.fileStore.readGlobalFile(gam_id)
+    
+    # Set up the VG run
+    vg_args = ["vg", "pileup", vg_filename, gam_filename]
+    
+    # TODO: configure filtering and stuff
+    
+    with job.fileStore.writeGlobalFileStream() as (pileup_handle, pileup_id):
+        # Pile up and stream the pileup to the file store
+        options.drunner.call([vg_args], outfile=pileup_handle)
+    
+    return pileup_id
+    
+def call_on_hgvm_job(job, options, eval_plan, hgvm, pileup_id):
+    """
+    Given a packaged HGVM Directory and a pileup file ID, produce variant calls
+    in Locus format. Returns a Directory with the Locus data as "calls.loci" and
+    the augmented graph as "augmented.vg".
+    
+    """
+    
+    # Download just the vg
+    vg_filename = job.fileStore.readGlobalFile(hgvm.get("hgvm.vg"))
+    
+    # Download the pileup
+    pileup_filename = job.fileStore.readGlobalFile(pileup_id)
+    
+    # Pick an augmented graph filename
+    augmented_filename = job.fileStore.getLocalTempDir() + "/augmented.vg"
+    
+    # TODO: don't just guess a ref path. Make call not require one (or allow
+    # many).
+    ref_path = options.vcf_contig[0]
+    
+    # Set up the VG run
+    vg_args = ["vg", "call", "--no-vcf", "--aug-graph", augmented_filename,
+        "--ref", ref_path, vg_filename, pileup_filename]
+    
+    # TODO: configure thresholds and filters
+    
+    with job.fileStore.writeGlobalFileStream() as (locus_handle, locus_id):
+        # Call and stream the Locus data to the file store
+        options.drunner.call([vg_args], outfile=locus_handle)
+        
+    # Upload the augmented graph
+    augmented_id = job.fileStore.writeGlobalFile(augmented_filename)
+    
+    # Put the files in a Directory
+    results = Directory()
+    results.add("augmented.vg", augmented_id)
+    results.add("calls.loci", locus_id)
+    
+    return results
+    
 def hgvm_eval_job(job, options, eval_plan, hgvm):
     """
     Toil job for evaluating the HGVM. Takes a packaged HGVM Directory, and a
@@ -647,8 +762,30 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
     
     results = Directory()
     
-    # TODO: implement
-    
+    if len(eval_plan.get_fastq_ids()) > 0:
+        # If we have reads, align them
+        align_job = job.addChildJobFn(align_to_hgvm_job, options, eval_plan,
+            hgvm, fastqs=eval_plan.get_fastq_ids(),
+            cores=16, memory="50G", disk="100G")
+        results.add("aligned.gam", align_job.rv())
+        
+        # Then do the pileup
+        pileup_job = align_job.addFollowOnJobFn(pileup_on_hgvm_job, options,
+            eval_plan, hgvm, align_job.rv(),
+            cores=1, memory="50G", disk="100G")
+        results.add("pileup.vgpu", pileup_job.rv())
+        
+        # Then do the calling
+        call_job = pileup_job.addFollowOnJobFn(call_on_hgvm_job, options,
+            eval_plan, hgvm, pileup_job.rv(),
+            cores=1, memory="50G", disk="50G")
+        
+        # Then merge directories and return
+        return call_job.addFollowOnJobFn(merge_directories_job,
+            [results, call_job.rv()],
+            cores=1, memory="2G", disk="1G").rv()
+
+    # Otherwise return this empty directory
     return results
     
 def main_job(job, options, plan, eval_plan):
@@ -736,7 +873,7 @@ def main(args):
             
         try:
             # Make sure the output directory exists
-            os.makedirs(options.out_dir)
+            os.makedirs(options.out_dir + "/eval")
         except OSError:
             # It may exist already
             pass

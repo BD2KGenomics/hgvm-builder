@@ -72,7 +72,9 @@ class Directory(object):
         Logger.info("Export directory to {}".format(base_url))
         
         for file_name, file_id in self.for_each_file():
-            # Export every file under the given base URL.
+            # Export every file under the given base URL. TODO: catch when Toil
+            # is using file URLs and make it make subdirectories instead of
+            # crashing.
             toil_instance.exportFile(file_id, "{}/{}".format(base_url,
                 file_name))
                 
