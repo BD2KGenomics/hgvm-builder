@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import collections
+import itertools
 
 import toil
 from toil.common import Toil
@@ -73,6 +74,11 @@ def parse_args(args):
         help="root of input assembly structure in GRC format")
     parser.add_argument("--vcfs_url", action="append", default=[],
         help="directory of VCFs per chromosome (may repeat)")
+    parser.add_argument("--vcf_url", action="append", default=[],
+        help="single VCF for a particular chromosome")
+    parser.add_argument("--vcf_contig", action="append", default=[],
+        help="contig/chromosome for the corresponding VCF")
+        
     # For evaluation
     parser.add_argument("--control_graph_url", default=None,
         help="use the given vg file as a control")
@@ -104,7 +110,7 @@ def parse_args(args):
         
     return parser.parse_args(args)
    
-def create_plan(assembly_url, vcfs_urls, hal_url, base_vg_url):
+def create_plan(assembly_url, vcfs_urls, vcf_urls, vcf_contigs, hal_url, base_vg_url):
     """
     Given an FTP or file url to the root of a GRC-format assembly_structure
     directory tree, and an FTP or file URL to a directory of chrXXX VCFs,
@@ -121,6 +127,14 @@ def create_plan(assembly_url, vcfs_urls, hal_url, base_vg_url):
     for vcfs_url in vcfs_urls:
         # Parse each VCF directory and add the VCFs
         thousandgenomesparser.parse(plan, vcfs_url)
+        
+    for vcf_url, vcf_contig in itertools.izip(vcf_urls, vcf_contigs):
+        # Add each single-contig VCF for its contig
+        plan.add_variants(vcf_contig, vcf_url)
+        
+        if vcf_url.lower().endswith(".gz"):
+            # Also add the index that we assume exists
+            plan.add_variants_index(vcf_url + ".tbi")
     
     if hal_url is not None:
         # We have a HAL file to convert to VG
@@ -385,8 +399,8 @@ def explode_vg_job(job, options, plan, vg_id):
         if line == "":
             # Skip blank lines
             continue
-        # Split each line on tabs
-        parts = line.split("\t")
+        # Remove newlines and split each line on tabs.
+        parts = line.strip().split("\t")
         
         # Validate the part
         options.drunner.call([["vg", "validate", parts[0]]])
@@ -394,7 +408,8 @@ def explode_vg_job(job, options, plan, vg_id):
         # Save the file (first entry) to the filestore
         part_id = job.fileStore.writeGlobalFile(parts[0])
         
-        # Remember that all of its paths belong to it
+        # Remember that all of its paths belong to it. Make sure to trim tabs
+        # and newlines.
         paths_by_part[part_id] = parts[1:]
         
         RealtimeLogger.info("Placed {} paths in part {}".format(len(parts) - 1, parts[0]))
@@ -431,6 +446,8 @@ def add_variants_to_parts_job(job, options, plan, paths_by_part):
         
         # Grab the applicable VCFs, flattening across all paths in the VG
         vcfs = list({vcf_id for path in paths for vcf_id in vcfs_by_path[path]})
+        
+        RealtimeLogger.info("VCFs: {} for paths: {}".format(vcfs, paths))
         
         # Add those VCFs to this VG
         child = job.addChildJobFn(add_variants_job, options, plan, vg_id,
@@ -696,7 +713,8 @@ def main(args):
         
             # Build the plan on the head node
             plan = create_plan(options.assembly_url, options.vcfs_url,
-                options.hal_url, options.base_vg_url)
+                options.vcf_url, options.vcf_contig, options.hal_url,
+                options.base_vg_url)
                 
             # Also build the evaluation plan on the head node
             eval_plan = create_eval_plan(options.control_graph_url,

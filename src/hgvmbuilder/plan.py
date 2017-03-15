@@ -184,8 +184,9 @@ class ReferencePlan(object):
         
     def add_variants(self, chromosome_name, url): 
         """
-        Adds the gzipped VCF at the given URL as variants to be applied to the
-        given chromosome number or X/Y/MT name.
+        Adds the possibly-gzipped VCF at the given URL as variants to be applied
+        to the given chromosome number or X/Y/MT name.
+        
         """
         
         self.vcf_urls[chromosome_name].append(url)
@@ -322,7 +323,8 @@ class ReferencePlan(object):
             
             for vcf_url in urls:
                 imported_id = import_function(vcf_url)
-                Logger.info("Imported VCF {} as {}".format(vcf_url, imported_id))
+                Logger.info("Imported VCF {} for {} as {}".format(vcf_url,
+                    chrom_name, imported_id))
                 self.vcf_ids[chrom_name].append(imported_id)
                 
                 if self.vcf_index_urls.has_key(vcf_url):
