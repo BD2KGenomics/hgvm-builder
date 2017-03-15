@@ -28,10 +28,12 @@ from toil.job import Job
 from toil.realtimeLogger import RealtimeLogger
 
 from .plan import ReferencePlan
+from .evaluation import EvaluationPlan
 from . import grcparser
 from . import thousandgenomesparser
 from .transparentunzip import TransparentUnzip
 from .commandrunner import CommandRunner
+from .directory import Directory
 
 # Get a submodule-global logger
 Logger = logging.getLogger("build")
@@ -72,17 +74,15 @@ def parse_args(args):
     parser.add_argument("--vcfs_url", action="append", default=[],
         help="directory of VCFs per chromosome (may repeat)")
     # For evaluation
-    parser.add_argument("--control_graph", default=None,
+    parser.add_argument("--control_graph_url", default=None,
         help="use the given vg file as a control")
-    parser.add_argument("--control_graph_xg", default=None,
+    parser.add_argument("--control_graph_xg_url", default=None,
         help="use the given xg index for the control graph")
-    parser.add_argument("--control_graph_gcsa", default=None,
+    parser.add_argument("--control_graph_gcsa_url", default=None,
         help="use the given gcsa/lcp index for the control graph")
-    parser.add_argument("--eval_fq1", default=None,
-        help="end 1 FASTQ file of evaluation reads")
-    parser.add_argument("--eval_fq2", default=None,
-        help="end 2 FASTQ file of evaluation reads") 
-    parser.add_argument("--eval_sequences", default=None,
+    parser.add_argument("--sample_fastq_url", action="append", default=[],
+        help="FASTQ for one end of evaluation reads")
+    parser.add_argument("--eval_sequences_url", default=None,
         help="sequences to align to the sample graph, one sequence per line")
         
         
@@ -132,6 +132,38 @@ def create_plan(assembly_url, vcfs_urls, hal_url, base_vg_url):
     
     # Return the completed plan
     return plan
+    
+def create_eval_plan(control_url, xg_url, gcsa_url, sample_fq_urls,
+    sequences_url):
+    """
+    Create an EvaluationPlan to compare againbst the given control graph (with
+    the given xg, and GCSA/LCP indexes), by variant calling with the given
+    FASTQs and then realigning the given sequences to the sample graph.
+    """
+    
+    eval_plan = EvaluationPlan()
+    
+    if control_url is not None:
+        # Grab the control graph
+        eval_plan.set_control_graph(control_url)
+    
+    if xg_url is not None:
+        # And its XG index
+        eval_plan.set_control_graph_xg(xg_url)
+   
+    if gcsa_url is not None:
+        # And its GCSA/LCP index. Assume the lcp is named right
+        eval_plan.set_control_graph_gcsa(gcsa_url, gcsa_url + ".lcp")
+        
+    for url in sample_fq_urls:
+        # And all the FASTQs
+        eval_plan.add_fastq(url)
+        
+    if sequences_url is not None:
+        # And the sequences that will be used to evaluate the called graphs
+        eval_plan.set_eval_sequences(sequences_url)
+        
+    return eval_plan
    
 def prepare_fasta(job, fasta_id):
     """
@@ -516,12 +548,35 @@ def add_variants_job(job, options, plan, vg_id, vcf_ids):
     
     return new_vg_id
     
+def hgvm_package_job(job, options, plan, vg_id, xg_id, gcsa_pair):
+    """
+    Given a VG file ID, and XG file ID, and a pair of GCSA and LCP file IDs,
+    produce a Directory with "hgvm.vg", "hgvm.xg", "hgvm.gcsa", and
+    "hgvm.gcsa.lcp" filled in.
     
-def main_job(job, options, plan):
+    Runs as a Toil job so it will be able to unpack the pair.
+    
     """
-    Root Toil job. Returns a tripple of lists of a VG file IDs, XG index file
-    IDs, and GCSA/LCP file ID pairs.
+    
+    # Package up the file IDs into a Directory
+    hgvm = Directory()
+    hgvm.add("hgvm.vg", vg_id)
+    hgvm.add("hgvm.xg", xg_id)
+    hgvm.add("hgvm.gcsa", gcsa_pair[0])
+    hgvm.add("hgvm.gcsa.lcp", gcsa_pair[1])
+    
+    return hgvm
+    
+    
+    
+def hgvm_build_job(job, options, plan):
     """
+    Toil job for building the HGVM. Returns a Directory object holding
+    "hgvm.vg", "hgvm.xg", "hgvm.gcsa", and "hgvm.gcsa.lcp".
+    
+    """
+    
+    RealtimeLogger.info("Building HGVM")
     
     # Make a child to convert the HALs and merge the VGs
     vg_job = job.addChildJobFn(hals_and_vgs_to_vg_job, options, plan,
@@ -553,9 +608,54 @@ def main_job(job, options, plan):
         merge_job.rv(),
         cores=16, memory="100G", disk="500G")
     
-    # Return the graph and the index
-    return [merge_job.rv()], [xg_job.rv()], [gcsa_job.rv()]
+    # And a job to package it all up, depending on the XG and GCSA.
+    directory_job = xg_job.addFollowOnJobFn(hgvm_package_job, options, plan,
+        merge_job.rv(), xg_job.rv(), gcsa_job.rv(),
+        cores=1, memory="2G", disk="1G")
+    gcsa_job.addFollowOn(directory_job)
     
+    # Return the Directory with the packaged HGVM
+    return directory_job.rv()
+    
+def hgvm_eval_job(job, options, eval_plan, hgvm):
+    """
+    Toil job for evaluating the HGVM. Takes a packaged HGVM Directory, and a
+    plan for evaluating it.
+    
+    Returns the evaluation results as a Directory.
+    
+    """
+    
+    RealtimeLogger.info("Evaluating HGVM")
+    
+    results = Directory()
+    
+    # TODO: implement
+    
+    return results
+    
+def main_job(job, options, plan, eval_plan):
+    """
+    Root job of the Toil workflow. Build and then evaluate an HGVM.
+    
+    Returns a pair of the packaged HGVM Directory and the evaluation results
+    Directory.
+    
+    """
+    
+    RealtimeLogger.info("Main job starting")
+    
+    # Build the HGVM
+    build_job = job.addChildJobFn(hgvm_build_job, options, plan,
+        cores=1, memory="2G", disk="1G")
+    
+    # Then evaluate it
+    eval_job = build_job.addFollowOnJobFn(hgvm_eval_job, options, eval_plan,
+        build_job.rv(),
+        cores=1, memory="2G", disk="1G")
+        
+    # Return the pair of created Directories
+    return (build_job.rv(), eval_job.rv())
     
 def main(args):
     """
@@ -597,40 +697,37 @@ def main(args):
             # Build the plan on the head node
             plan = create_plan(options.assembly_url, options.vcfs_url,
                 options.hal_url, options.base_vg_url)
+                
+            # Also build the evaluation plan on the head node
+            eval_plan = create_eval_plan(options.control_graph_url,
+                options.control_graph_xg_url, options.control_graph_gcsa_url,
+                options.sample_fastq_url, options.eval_sequences_url)
         
-            # Import all the files from the plan. Now the plan will hold Toil
+            # Import all the files from the plans. Now the plans will hold Toil
             # IDs for data files, and actual info for metadata files.
             plan.bake(lambda url: toil_instance.importFile(url))
+            eval_plan.bake(lambda url: toil_instance.importFile(url))
         
             # Make a root job
-            root_job = Job.wrapJobFn(main_job, options, plan,
+            root_job = Job.wrapJobFn(main_job, options, plan, eval_plan,
                 cores=1, memory="1G", disk="1G")
             
-            # Run the root job and get one or more IDs for vg graphs, in a list
-            graph_ids, xg_ids, gcsa_ids = toil_instance.start(root_job)
+            # Run the root job and get the packaged HGVM and its evaluation as
+            # Directories.
+            hgvm_directory, eval_directory = toil_instance.start(root_job)
             
         try:
             # Make sure the output directory exists
-            os.mkdirs(options.out_dir)
+            os.makedirs(options.out_dir)
         except OSError:
             # It may exist already
             pass
-        
-        for i, graph_id in enumerate(graph_ids):
-            # Export all the graphs as VG files in arbitrary order
-            toil_instance.exportFile(graph_id, "file:{}/part{}.vg".format(
-                options.out_dir, i))
-        for i, index_id in enumerate(xg_ids):
-            # Export all the graph XG indexes as XG files in the same order
-            toil_instance.exportFile(index_id, "file:{}/part{}.xg".format(
-                options.out_dir, i))
-        for i, (gcsa_id, lcp_id) in enumerate(gcsa_ids):
-            # Export all the graph GCSA indexes as GCSA/LCP files in the same
-            # order
-            toil_instance.exportFile(gcsa_id, "file:{}/part{}.gcsa".format(
-                options.out_dir, i))
-            toil_instance.exportFile(lcp_id, "file:{}/part{}.gcsa.lcp".format(
-                options.out_dir, i))
+            
+        # Export the HGVM
+        hgvm_directory.export(toil_instance, "file:{}".format(options.out_dir))
+        # And stick its evaluations inside it for now
+        eval_directory.export(toil_instance,
+            "file:{}/eval".format(options.out_dir))
         
     print("Toil workflow complete")
     return 0

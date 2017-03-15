@@ -1,10 +1,6 @@
 #hgvm-builder evaluation.py: Represent reference graph evaluation regimines as objects
 
 import logging
-import urllib2
-import collections
-
-import tsv
 
 Logger = logging.getLogger("evaluation")
 
@@ -47,6 +43,103 @@ class EvaluationPlan(object):
         # And to its GCSA LCP file
         self.control_graph_gcsa_lcp_url = None
         
+        # Then these will hold the IDs
+        self.fastq_ids = []
+        self.control_graph_id = None
+        # This maps from vg ID to xg index ID
+        self.xg_ids = {}
+        # This maps from vg ID to gcsa and lcp index ID pair
+        self.gcsa_lcp_ids = {}
+        
+        
+    def add_fastq(self, fastq_url):
+        """
+        Add the given FASTQ either as a single FASTQ or as a memebr of the PASTQ
+        pair.
+        """
+        
+        assert(len(self.fastq_urls) <= 2)
+        self.fastq_urls.append(fastq_url)
+        
+    def set_eval_sequences(self, url):
+        """
+        Set the URL from which to obtain the sequences to be realigned to the
+        sample graph for evaluating it.
+        """
+        
+        self.eval_sequences_url = url
+        
+    def set_control_graph(self, url):
+        """
+        Set the control graph to be compared to the experimental graph.
+        """
+        
+        self.control_graph_url = url
+        
+    def set_control_graph_xg(self, url):
+        """
+        Set the XG index for the control graph.
+        """
+        
+        self.control_graph_xg_url = url
+        
+    def set_control_graph_gcsa(self, gcsa_url, lcp_url):
+        """
+        Set the GCSA/LCP index for the control graph.
+        """
+        
+        self.control_graph_gcsa_url = gcsa_url
+        self.control_graph_gcsa_lcp_url = lcp_url
+        
+    def get_fastq_ids(self):
+        """
+        Get the 0-2 FASTQ file IDs to use as a list.
+        """
+        
+        return self.fastq_ids
+        
+    def get_control_graph_id(self):
+        """
+        Return the file ID of the control graph, or None if no such graph was
+        specified.
+        
+        """
+        
+        return self.control_graph_id
+        
+    def get_xg_id(self, vg_id):
+        """
+        Return the file ID for the given vg graph ID, or None if no index
+        exists.
+        """
+        
+        return self.xg_ids.get(vg_id, None)
+        
+    def get_gcsa_id(self, vg_id):
+        """
+        Return the GCSA index ID for the given vg graph ID, or None if no index
+        exists.
+        """
+        
+        if self.gcsa_lcp_ids.has_key(vg_id):
+            # We have a GCSA/LCP, so return the first ID (GCSA)
+            return self.gcsa_lcp_ids[vg_id][0]
+        else:
+            return None
+            
+    def get_lcp_id(self, vg_id):
+        """
+        Return the GCSA LCP index ID for the given vg graph ID, or None if no
+        index exists.
+        
+        """
+        
+        if self.gcsa_lcp_ids.has_key(vg_id):
+            # We have a GCSA/LCP, so return the second ID (LCP)
+            return self.gcsa_lcp_ids[vg_id][1]
+        else:
+            return None
+        
     def bake(self, import_function):
         """
         "Bake" the plan by importing data files into a file storage system.
@@ -72,8 +165,30 @@ class EvaluationPlan(object):
         else:
             self.eval_sequences_id = None
             
-        # TODO: finish this!
-                   
+        if self.control_graph_url is not None:
+            # Grab the control graph since it exists
+            self.control_graph_id = import_function(self.control_graph_url)
+            
+            Logger.info("Imported control graph {} as {}".format(
+                self.control_graph_url, self.control_graph_id))
+            
+            if self.control_graph_xg_url is not None:
+                # Grab the control graph xg index since it exists
+                self.xg_ids[self.control_graph_id] = import_function(
+                    self.control_graph_xg_url)
+                
+            if (self.control_graph_gcsa_url is not None and
+                self.control_graph_gcsa_lcp_url is not None):
+                # Grab the control graph gcsa/lcp index since it exists
+                self.gcsa_lcp_ids = (
+                    import_function(self.control_graph_gcsa_url),
+                    import_function(self.control_graph_gcsa_lcp_url))
+        else:
+            # No control graph
+            self.control_graph_id = None
+            
+            
+            
         
         
         

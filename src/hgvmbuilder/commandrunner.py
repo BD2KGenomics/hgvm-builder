@@ -2,6 +2,8 @@
 
 import logging
 import subprocess
+import os
+import os.path
 
 # Get a submodule-global logger
 Logger = logging.getLogger("commandrunner")
