@@ -366,22 +366,6 @@ def merge_vgs_job(job, options, plan, vg_ids):
             
         return vg_id
         
-        
-def merge_directories_job(job, directories):
-    """
-    Merge a list of Directories into one Directory with all the files.
-    """
-    
-    merged = Directory()
-    
-    for other in directories:
-        for file_name, file_id in other.for_each_file():
-            # Toil did the hard work of resolving the promises so just copy
-            # everything over.
-            merged.add(file_name, file_id)
-            
-    return merged
-        
 def explode_vg_job(job, options, plan, vg_id):
     """
     Explode the given vg file into connected component subgraphs.
@@ -757,7 +741,20 @@ def subset_graph_job(job, options, eval_plan, call_directory):
     sample graph's file ID.
     """
     
-    pass
+    # Download the calling results
+    call_dir = job.fileStore.getLocalTempDir()
+    call_directory.download(job.fileStore, call_dir)
+    
+    # Set up the VG run
+    vg_args = ["vg", "mod", "--sample-graph", call_dir + "/calls.loci",
+        call_dir + "/augmented.vg"]
+        
+    with job.fileStore.writeGlobalFileStream() as (sample_handle, sample_id):
+        # Stream the sample graph to the file store
+        options.drunner.call([vg_args], outfile=sample_handle)
+        
+    return sample_id
+    
     
 def hgvm_eval_job(job, options, eval_plan, hgvm):
     """
@@ -778,8 +775,7 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
             hgvm, fastqs=eval_plan.get_fastq_ids(),
             cores=16, memory="50G", disk="100G")
         # Put it in a Directory in a promise
-        align_promise = ToilPromise.wrap(align_job)
-        align_dir_promise = align_promise.then(
+        align_promise = ToilPromise.wrap(align_job).then(
             lambda id: Directory({"aligned.gam": id}))
         
         # Then do the pileup
@@ -787,8 +783,7 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
             eval_plan, hgvm, align_job.rv(),
             cores=1, memory="50G", disk="100G")
         # Put it in a Directory in a promise
-        pileup_promise = ToilPromise.wrap(pileup_job)
-        pileup_dir_promise = pileup_promise.then(
+        pileup_promise = ToilPromise.wrap(pileup_job).then(
             lambda id: Directory({"pileup.vgpu": id}))
         
         # Then do the calling
@@ -797,19 +792,21 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
             cores=1, memory="50G", disk="50G")
         # And a promise for the call results directory.
         call_promise = ToilPromise.wrap(call_job)
-            
         
-        # Collect the results, which makes a followon of a followon of us and of a child of us.
-        all_promise = ToilPromise.all([align_dir_promise, pileup_dir_promise, call_promise])
+        # Then subset the graph and get the new VG id and put it in a directory
+        # Then do the calling
+        subset_job = call_job.addFollowOnJobFn(subset_graph_job, options,
+            eval_plan, call_job.rv(),
+            cores=1, memory="50G", disk="50G")
+        # And a promise for the call results directory.
+        subset_promise = ToilPromise.wrap(subset_job).then(
+            lambda id: Directory({"sample.vg": id}))
         
-        # Merge the directories, which makes a followon of that.
-        merge_promise = all_promise.then(
-            lambda dirs: dirs[0].merge(dirs[1]).merge(dirs[2]))
-            
-        # Return the Toil .rv() for the merged directory (which ends up
-        # depending on us as a followon, but that's OK because other followons
-        # can't access our .rv())
-        return merge_promise.unwrap_result()
+        
+        # Collect the result directories and merge them, and return the result
+        return ToilPromise.all(
+            [align_promise, pileup_promise, call_promise, subset_promise]).then(
+            lambda dirs: dirs[0].merge(*dirs[1:])).unwrap_result()
 
     # Otherwise return this empty directory
     return results
@@ -824,21 +821,6 @@ def main_job(job, options, plan, eval_plan):
     """
     
     RealtimeLogger.info("Main job starting")
-    
-    def executor(resolve, reject):
-        RealtimeLogger.info("Resolving...")
-        resolve("Hello Promises")
-        
-    def resolve_handler(result):
-        RealtimeLogger.info("Got a result!")
-        RealtimeLogger.info("Result: {}".format(result))
-        return "{} Hooray".format(result)
-        
-    # Make a ToilPromise to run the executor   
-    promise = ToilPromise.add_child(job, executor)
-    
-    # Add some handlers in a chain
-    final_promise = promise.then(resolve_handler).then(resolve_handler)
     
     # Build the HGVM
     build_job = job.addChildJobFn(hgvm_build_job, options, plan,

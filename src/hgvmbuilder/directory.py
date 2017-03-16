@@ -69,16 +69,17 @@ class Directory(object):
                 # And if we find one that matches, yield it
                 yield (file_name, file_id)
                 
-    def merge(self, other):
+    def merge(self, *others):
         """
-        Merge all the files in the given other directory into this one.
+        Merge all the files in the given other directories into this one.
         
         Can be chained.
         """
         
-        for file_name, file_id in other.for_each_file():
-            # Just loop through the files and add them
-            self.add(file_name, file_id)
+        for other in others:
+            for file_name, file_id in other.for_each_file():
+                # Just loop through the files and add them
+                self.add(file_name, file_id)
             
         return self
                 

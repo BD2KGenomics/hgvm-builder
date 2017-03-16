@@ -13,26 +13,22 @@ Logger = logging.getLogger("toilpromise")
 
 class ToilPromise(object):
     """
-    Represents a Promise. A promise has an executor function that takes resolve
-    and reject functions as arguments.
+    Represents a Promise. A promise (theoretically) has an executor function
+    that takes resolve and reject functions as arguments. In practice we have a
+    bunch of fake executor functions.
     
-    When the promise succeeds, it must call its resolve function with its
+    When the executor succeeds, it must call its resolve function with its
     result. When it fails, it must call its reject function with its error
     message.
     
     You can use .then(success_handler) to register a function to be called with
     the result when the promise succeeds.
     
-    You can use .catch(failure_handler) to register a function to be called with
-    the result when the promise fails.
-    
     Handlers will be called in follow-on Toil jobs, in order to resolve their
     return values.
     
     TODO: We should have a base class and a bunch of polymorphic implementations
-    that all implement something like .get_toil_job(), .add_dependent(), and
-    .start(), and have them polymorphically wire up the Toil graph when the root
-    is start()'ed.
+    that all implement something like .get_toil_job().
     
     """
     
@@ -239,40 +235,34 @@ class ToilPromise(object):
         
             if self.parent_job is not None and self.result is not None:
                 # We want a promise that always resolves, as a child job.
-                RealtimeLogger.info("Start child resolve promise")
                 self.promise_job = self.parent_job.addChildJobFn(
                     promise_resolve_job, self)
                     
             elif self.prev_job is not None and self.result is not None:
                 # We want a promise that always resolves, as a followon job.
-                RealtimeLogger.info("Start follow-on resolve promise")
                 self.promise_job = self.prev_job.addFollowOnJobFn(
                     promise_resolve_job, self)
                     
             elif self.parent_job is not None and self.executor_dill is not None:
                 # We want to run this executor closure under this job as a child
-                RealtimeLogger.info("Start child promise")
                 self.promise_job = self.parent_job.addChildJobFn(
                     promise_executor_job, self)
                 
             elif self.prev_job is not None and self.executor_dill is not None:
                 # We want to run this executor closure under this job as a
                 # follow-on
-                RealtimeLogger.info("Start follow-on promise")
                 self.promise_job = self.prev_job.addFollowOnJobFn(
                     promise_executor_job, self)
                     
             elif self.prev_promise is not None and self.then_dill is not None:
                 # We are handling a .then() promise that depends on one parent.
                 # We assume the parent is started, and add as a follow-on.
-                RealtimeLogger.info("Start then promise")
                 self.promise_job = \
                     self.prev_promise.promise_job.addFollowOnJobFn(
                     promise_then_job, self, self.prev_promise.promise_job.rv())
                     
             elif self.wrapped_job is not None and self.executor_dill is None:
                 # We want to wrap this Toil job
-                RealtimeLogger.info("Start wrapper promise")
                 self.promise_job = self.wrapped_job.addFollowOnJobFn(
                     promise_wrapper_job, self, self.wrapped_job.rv())
                     
@@ -280,7 +270,6 @@ class ToilPromise(object):
                 # We want to run after all these started promises and resolve with
                 # their results.
                 
-                RealtimeLogger.info("Start all promise")
                 
                 # Have all the promises we need to wait for been start()'ed?
                 all_started = True
@@ -293,40 +282,34 @@ class ToilPromise(object):
                     if waited.promise_job is not None:
                         # This dependency has start()'ed
                         rv_list.append(waited.promise_job.rv())
-                        RealtimeLogger.info("Add input promise from {}".format(waited.promise_job))
                     else:
-                        RealtimeLogger.info("Missing job for {}".format(waited))
                         all_started = False
                         
                 if all_started:
                     # We can actually schedule!
-                    
-                    RealtimeLogger.info("All started!")
                     
                     # Make a job to resolve us with all the successes, or reject
                     # us with the failures
                     self.promise_job = Job.wrapJobFn(promise_all_job, self,
                         rv_list)
                     
-                    RealtimeLogger.info("Made all job!")
-                    
                     # Schedule it after all the promises it is supposed to wait
                     # for.
                     for waited in self.wait_for:
                         waited.promise_job.addFollowOn(self.promise_job)
-                        RealtimeLogger.info("Add dependency of {} on {}".format(self.promise_job, waited.promise_job))
                 
             else:
                 raise RuntimeError("Invalid promise configuration!")
           
         if self.promise_job is not None:
             # Our dependencies are all ready, so we are too!
-            RealtimeLogger.info("Promise's job is {}".format(repr(self.promise_job)))
             for dependent in self.dependents:
                 # Start the dependents, which may have jobs created for all their
                 # dependsencies now.
                 dependent.start()
                 
+        # TODO: everything should be started when it's made, since then handlers
+        # now live in their own promises. We can basically cut this function!
         assert(self.promise_job is not None)
             
         
@@ -335,7 +318,7 @@ class ToilPromise(object):
         Handle promise resolution. Runs in the promise's assigned job.
         """
         
-        RealtimeLogger.info("Promise Resolved: {}".format(result))
+        Logger.info("Promise Resolved: {}".format(result))
         
         # Cache the result
         self.result = result
@@ -347,6 +330,7 @@ class ToilPromise(object):
         Handle promise rejection.
         """
         
+        Logger.error("Promise Rejected: {}".format(err))
         RealtimeLogger.error("Promise Rejected: {}".format(err))
         
         self.err = err
@@ -558,8 +542,6 @@ def promise_executor_job(job, promise):
     executor(lambda result: promise.handle_resolve(job, result),
         lambda err: promise.handle_reject(job, err))
         
-    RealtimeLogger.info("Executor returning {}, {}".format(promise.result, promise.err))
-        
     # Grab the cached result and return it
     return (promise.result, promise.err)
     
@@ -577,8 +559,6 @@ def promise_then_job(job, promise, prev_promise_returned):
     then_handler = dill.loads(promise.then_dill)
     
     resolved, rejected = prev_promise_returned
-    
-    RealtimeLogger.info("Run {} with {}".format(then_handler, prev_promise_returned))
     
     if rejected is None:
         # Actually run this child promise
