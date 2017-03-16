@@ -806,11 +806,6 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
         merge_promise = all_promise.then(
             lambda dirs: dirs[0].merge(dirs[1]).merge(dirs[2]))
             
-        # Start the promises and create the static Toil graph
-        align_promise.start()
-        pileup_promise.start()
-        call_promise.start()
-        
         # Return the Toil .rv() for the merged directory (which ends up
         # depending on us as a followon, but that's OK because other followons
         # can't access our .rv())
@@ -844,10 +839,6 @@ def main_job(job, options, plan, eval_plan):
     
     # Add some handlers in a chain
     final_promise = promise.then(resolve_handler).then(resolve_handler)
-    
-    # Start the root promise and all dependents, adding them to the Toil job
-    # graph
-    promise.start()
     
     # Build the HGVM
     build_job = job.addChildJobFn(hgvm_build_job, options, plan,

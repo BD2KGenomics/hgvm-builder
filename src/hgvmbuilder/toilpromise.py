@@ -38,7 +38,8 @@ class ToilPromise(object):
     
     def __init__(self):
         """
-        Make a new Promise that does nothing.
+        Make a new Promise that does nothing. Not to be used outside this class.
+        
         """
         
         # These fields pickle
@@ -132,6 +133,9 @@ class ToilPromise(object):
         
         # And it's a dependent of us, so when we start it will start
         self.add_dependent(child)
+        
+        # Assuming we were started, start the child.
+        child.start()
         
         return child
         
@@ -291,6 +295,7 @@ class ToilPromise(object):
                         rv_list.append(waited.promise_job.rv())
                         RealtimeLogger.info("Add input promise from {}".format(waited.promise_job))
                     else:
+                        RealtimeLogger.info("Missing job for {}".format(waited))
                         all_started = False
                         
                 if all_started:
@@ -321,6 +326,8 @@ class ToilPromise(object):
                 # Start the dependents, which may have jobs created for all their
                 # dependsencies now.
                 dependent.start()
+                
+        assert(self.promise_job is not None)
             
         
     def handle_resolve(self, job, result):
@@ -409,6 +416,10 @@ class ToilPromise(object):
         promise = ToilPromise()
         promise.result = result
         promise.set_parent_job(parent_job)
+        
+        # Since the parent job exists, we can make our job.
+        promise.start()
+        
         return promise
         
     @staticmethod
@@ -425,6 +436,10 @@ class ToilPromise(object):
         promise = ToilPromise()
         promise.result = result
         promise.set_prev_job(prev_job)
+        
+        # Since the prev job exists, we can make our job.
+        promise.start()
+        
         return promise
             
     @staticmethod
@@ -448,6 +463,10 @@ class ToilPromise(object):
         for promise in promises:
             promise.add_dependent(after_promise)
         
+        # Assuming all the promises we wanted to depend on have started, start
+        # this one.
+        after_promise.start()
+        
         return after_promise
         
     @staticmethod
@@ -462,6 +481,10 @@ class ToilPromise(object):
         
         wrapper_promise = ToilPromise()
         wrapper_promise.set_wrapped(toil_job)
+        
+        # Since the wrapped job exists, we can make our job.
+        wrapper_promise.start()
+        
         return wrapper_promise
         
     @staticmethod
@@ -479,6 +502,10 @@ class ToilPromise(object):
         child_promise = ToilPromise()
         child_promise.set_executor(executor)
         child_promise.set_parent_job(parent_job)
+        
+        # Since the parent job exists, we can make our job.
+        child_promise.start()
+        
         return child_promise
         
     @staticmethod
@@ -496,6 +523,10 @@ class ToilPromise(object):
         child_promise = ToilPromise()
         child_promise.set_executor(executor)
         child_promise.set_prev_job(prev_job)
+        
+        # Since the prev job exists, we can make our job.
+        child_promise.start()
+        
         return child_promise
         
 
