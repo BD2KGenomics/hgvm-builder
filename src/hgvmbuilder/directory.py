@@ -22,23 +22,29 @@ class Directory(object):
     
     """
     
-    def __init__(self):
+    def __init__(self, values={}):
         """
-        Make a new empty Directory with no files.
+        Make a new empty Directory with no files (by default), or the files
+        given in the specified dictionary.
+        
         """
         
         # This holds Toil IDs by file name
-        self.ids = {}
+        self.ids = values
         
     def add(self, file_name, file_id):
         """
         Save the file with the given ID in the directory under the given name.
         No leading slashes should be used. "." and ".." are not supported.
+        
+        Can be chained.
         """
         
         self.ids[file_name] = file_id
         
         Logger.info("Saved {} as {}".format(file_id, file_name))
+        
+        return self
         
     def get(self, file_name):
         """
@@ -63,10 +69,25 @@ class Directory(object):
                 # And if we find one that matches, yield it
                 yield (file_name, file_id)
                 
+    def merge(self, other):
+        """
+        Merge all the files in the given other directory into this one.
+        
+        Can be chained.
+        """
+        
+        for file_name, file_id in other.for_each_file():
+            # Just loop through the files and add them
+            self.add(file_name, file_id)
+            
+        return self
+                
     def export(self, toil_instance, base_url):
         """
         Export all the files in the Cirectory under the given base URL, using
         the given Toil instance. Must bve run on the Toil master.
+        
+        Can be chained.
         """
         
         Logger.info("Export directory to {}".format(base_url))
@@ -78,11 +99,15 @@ class Directory(object):
             toil_instance.exportFile(file_id, "{}/{}".format(base_url,
                 file_name))
                 
+        return self
+                
     def download(self, file_store, base_path):
         """
         Download all the contents of the Directory to the given local path,
         which may not yet exist, using the given Toil FileStore. Can be run on
         any node, but writes only to the node's local filesystem.
+        
+        Can be chained.
         """
         
         Logger.info("Download directory to {}".format(base_path))
@@ -108,6 +133,8 @@ class Directory(object):
             # Actually download the file to the given directory. TODO: can this
             # result in a broken symlink if the joibstore goes away?
             file_store.readGlobalFile(file_id, local_name)
+            
+        return self
         
             
     
