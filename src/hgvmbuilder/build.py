@@ -585,6 +585,30 @@ def hgvm_package_job(job, options, plan, vg_id, xg_id, gcsa_pair):
     
     return hgvm
     
+def graph_to_hgvm_job(job, options, vg_id):
+    """
+    Convert just a vg graph into an HGVM directory with its indexes.
+    
+    Used for preparing a graph for realignment.
+    
+    """
+    
+    # TODO: drop this plan argument on lower-level functions
+    
+    # Make the indexes
+    xg_job = job.addChildJobFn(xg_index_job, options, None, vg_id,
+        cores=1, memory="100G", disk="20G")
+    gcsa_job = job.addChildJobFn(gcsa_index_job, options, None, vg_id,
+        cores=16, memory="100G", disk="500G")
+    
+    # Make a packaging job
+    hgvm_job = xg_job.addFollowOnJobFn(hgvm_package_job, options, None, vg_id,
+        xg_job.rv(), gcsa_job.rv())
+    gcsa_job.addFollowOn(hgvm_job)
+    
+    # Return its return value
+    return hgvm_job.rv()
+    
 def hgvm_build_job(job, options, plan):
     """
     Toil job for building the HGVM. Returns a Directory object holding
@@ -755,6 +779,27 @@ def subset_graph_job(job, options, eval_plan, call_directory):
         
     return sample_id
     
+def realignment_stats_job(job, options, eval_plan, vg_id, gam_id):
+    """
+    Use vg stats to get a report for the given alignments to the given graph.
+    
+    """
+    
+    # Download the VG file
+    vg_name = job.fileStore.readGlobalFile(vg_id)
+    
+    # Download the GAM file
+    gam_name = job.fileStore.readGlobalFile(gam_id)
+    
+    # Set up the VG run
+    vg_args = ["vg", "stats", "--verbose", "--alignments", gam_name, vg_name]
+        
+    with job.fileStore.writeGlobalFileStream() as (stats_handle, stats_id):
+        # Stream the stats to the file store
+        options.drunner.call([vg_args], outfile=stats_handle)
+        
+    return stats_id
+    
     
 def hgvm_eval_job(job, options, eval_plan, hgvm):
     """
@@ -801,11 +846,36 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
         # And a promise for the call results directory.
         subset_promise = ToilPromise.wrap(subset_job).then(
             lambda id: Directory({"sample.vg": id}))
-        
+            
+        # Make a list of all the output directory promises to squash together.
+        dir_promises = [align_promise, pileup_promise, call_promise,
+            subset_promise]
+            
+        if eval_plan.get_eval_sequences_id() is not None:
+            # We should realign these sequences
+            
+            # First reindex and package the sample itself as an HGVM
+            package_job = subset_job.addFollowOnJobFn(
+                graph_to_hgvm_job, options, subset_job.rv())
+            
+            # Then realign and grab the realigned GAM
+            realign_job = package_job.addFollowOnJobFn(align_to_hgvm_job, options, eval_plan,
+                package_job.rv(), sequences=eval_plan.get_eval_sequences_id(),
+                cores=16, memory="50G", disk="100G")
+                
+            # Then get the stats
+            stats_job = realign_job.addFollowOnJobFn(realignment_stats_job,
+                options, eval_plan, subset_job.rv(), realign_job.rv(),
+                cores=1, memory="50G", disk="100G")
+            # And put them in a directory
+            stats_promise = ToilPromise.wrap(stats_job).then(
+                lambda id: Directory({"stats.tsv": id}))
+            
+            # And merge it with the others
+            dir_promises.append(stats_promise)
         
         # Collect the result directories and merge them, and return the result
-        return ToilPromise.all(
-            [align_promise, pileup_promise, call_promise, subset_promise]).then(
+        return ToilPromise.all(dir_promises).then(
             lambda dirs: dirs[0].merge(*dirs[1:])).unwrap_result()
 
     # Otherwise return this empty directory

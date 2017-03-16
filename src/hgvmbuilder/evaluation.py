@@ -139,6 +139,13 @@ class EvaluationPlan(object):
             return self.gcsa_lcp_ids[vg_id][1]
         else:
             return None
+            
+    def get_eval_sequences_id(self):
+        """
+        Return the ID for the evaluation sequences file.
+        """
+        
+        return self.eval_sequences_id
         
     def bake(self, import_function):
         """
