@@ -1050,6 +1050,38 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
             eval_promises[condition] = ToilPromise.all(dir_promises).then(
                 lambda dirs: dirs[0].merge(*dirs[1:]))
                 
+        if (eval_plan.get_eval_sequences_id() is not None and
+            graphs_to_test.has_key("control")):
+            # Also consider realigning just against the control graph, without
+            # calling
+            condition = "allref"
+            
+            # Control is already indexed and packaged.
+            
+            # Realign and grab the realigned GAM
+            realign_job = job.addChildJobFn(align_to_hgvm_job,
+                options, eval_plan, graphs_to_test["control"],
+                sequences=eval_plan.get_eval_sequences_id(),
+                cores=16, memory="50G", disk="100G")
+                
+            # Then get the stats
+            stats_job = realign_job.addFollowOnJobFn(realignment_stats_job,
+                options, eval_plan, graphs_to_test["control"].get("hgvm.vg"),
+                realign_job.rv(),
+                cores=1, memory="50G", disk="100G")
+            # And put them in a directory
+            stats_promise = ToilPromise.wrap(stats_job).then(
+                lambda id: Directory({"stats.tsv": id}))
+            # And make a directory with just the stats for this condition
+            eval_promises[condition] = stats_promise
+            
+            # Then parse them
+            stats_parse_job = stats_job.addFollowOnJobFn(
+                parse_realignment_stats_job,
+                options, eval_plan, stats_job.rv())
+            # And make a promise and save it
+            stats_promises[condition] = ToilPromise.wrap(stats_parse_job)
+                
         # Now we have evaluated all the conditions. Make a plot TSV.
         
         # Gather all the stats dict pairs by condition, and the control length
