@@ -23,6 +23,8 @@ import sys
 import collections
 import itertools
 
+import tsv
+
 import toil
 from toil.common import Toil
 from toil.job import Job
@@ -804,8 +806,8 @@ def parse_realignment_stats_job(job, options, eval_plan, stats_id):
     """
     Parse the output of vg stats on a GAM. Returns two dicts.
     
-    The first is a dict from stat name ("Insertions", Deletions",
-    ""Substitutions", "Softclips") to (bp, event count) pairs.
+    The first is a dict from stat name ("Insertions", "Deletions",
+    "Substitutions", "Softclips") to (bp, event count) pairs.
     
     The second is a dict from node status name ("Unvisited nodes", "Single-
     visited nodes") to (bp, node count) pairs.
@@ -883,6 +885,54 @@ def measure_graph_job(job, options, vg_id):
             
     # Return the two metrics of graph size
     return bp_length, node_count
+    
+def stats_tsv_job(job, options, eval_plan, stats):
+    """
+    Takes some statistics, in the form of a pair.
+    
+    The first element is a dict from condition to pair of dicts, one of edit
+    operation stats and one of node status stats. Each dict entry is a pair of
+    (bp, event count).
+    
+    The second element is a pair (bp length, node count) for the control graph,
+    used for normalizing all the stats in terms of events or bases per primary
+    reference base. It may be None, in which case we should not normalize.
+    
+    Returns a Directory of TSV files, named after edit operation stats.
+    """
+    
+    # Unpack the argument
+    (by_condition, control_size) = stats
+    
+    # Define a directory to fill
+    directory = Directory()
+    
+    for edit in ("Insertions", "Deletions", "Substitutions", "Softclips"):
+        # For each kind of edit operation, we'll make a TSV in the file store
+    
+        with job.fileStore.writeGlobalFileStream() as (tsv_handle, tsv_id):
+            writer = tsv.TsvWriter(tsv_handle)
+        
+            for condition, (edit_stats, node_stats) in by_condition.iteritems():
+                # For each condition
+                
+                # Grab the edited bp count
+                edited = edit_stats[edit][0]
+        
+                if control_size is not None:
+                    # Normalize to fraction of primary path bases, if we're
+                    # normalizing
+                    edited /= float(control_size[0])
+                
+                # Add a TSV record for this condition
+                writer.line(condition, edited)
+                
+            # Then put the TSV in the directory after we put in all the
+            # conditions
+            directory.add("{}.tsv".format(edit), tsv_id)
+            
+    return directory
+        
     
 def hgvm_eval_job(job, options, eval_plan, hgvm):
     """
@@ -973,8 +1023,9 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
                     graph_to_hgvm_job, options, subset_job.rv())
                 
                 # Then realign and grab the realigned GAM
-                realign_job = package_job.addFollowOnJobFn(align_to_hgvm_job, options, eval_plan,
-                    package_job.rv(), sequences=eval_plan.get_eval_sequences_id(),
+                realign_job = package_job.addFollowOnJobFn(align_to_hgvm_job,
+                    options, eval_plan, package_job.rv(),
+                    sequences=eval_plan.get_eval_sequences_id(),
                     cores=16, memory="50G", disk="100G")
                     
                 # Then get the stats
@@ -991,29 +1042,34 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
                 stats_parse_job = stats_job.addFollowOnJobFn(
                     parse_realignment_stats_job,
                     options, eval_plan, stats_job.rv())
-                # And make a promise
-                parsed_stats_promise = ToilPromise.wrap(stats_parse_job)
-                    
-                # TODO: Then take the parsed stats and the control length, and feed
-                # them to a function
-                parsed_stats_promise.then(lambda pair: RealtimeLogger.info("Parsed stats: {}".format(pair)))
-                control_length_promise.then(lambda length: RealtimeLogger.info("Control length: {}".format(length)))
-        
+                # And make a promise and save it
+                stats_promises[condition] = ToilPromise.wrap(stats_parse_job)
+
             # Collect the result directories and merge them. Store a promise for
             # that directory under the condition name we are doing.
             eval_promises[condition] = ToilPromise.all(dir_promises).then(
                 lambda dirs: dirs[0].merge(*dirs[1:]))
                 
-        # Now we have evaluated all the conditions
+        # Now we have evaluated all the conditions. Make a plot TSV.
         
-        # Mount each condition's own directory in the eval directory, and return
-        # the resulting directory.
+        # Gather all the stats dict pairs by condition, and the control length
+        # (if any), and compute a Directory of TSVs using the appropriate Toil
+        # job function.
+        tsv_dir_promise = ToilPromise.all([ToilPromise.all(stats_promises),
+            control_length_promise]).then_job_fn(stats_tsv_job,
+                options, eval_plan)
+        
+        # Mount each condition's own directory in the eval directory.
         def mount_all(dirs_by_condition):
             root = Directory()
             for condition, directory in dirs_by_condition.iteritems():
                 root.mount(condition, directory)
             return root
-        return ToilPromise.all(eval_promises).then(mount_all).unwrap_result()
+        eval_dir_promise = ToilPromise.all(eval_promises).then(mount_all)
+        
+        # Then stick in all the comparative TSVs, and return the result
+        return ToilPromise.all([eval_dir_promise, tsv_dir_promise]).then(
+            lambda args: args[0].mount("tsv", args[1])).unwrap_result()
 
     # Otherwise return this empty directory
     return Directory()

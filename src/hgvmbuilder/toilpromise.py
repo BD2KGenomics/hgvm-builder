@@ -99,6 +99,33 @@ class ToilPromise(object):
         
         return child
         
+    def then_job_fn(self, job_fn, *args, **kwargs):
+        """
+        Pass the result of this ToilPromise to the given Toil job function,
+        which takes a Toil job as a first argument.
+        
+        Additional arguments after the job function name will be passed before
+        the promise's resolve value.
+        
+        If the promise rejects, the added Toil job may still be called, with a
+        None argument.
+        
+        """
+        
+        # Unwrap our result, and create the unwrapping job
+        unwrapped = self.unwrap_result()
+        
+        # Stick it on the extra agrs list at the end, so it comes last.
+        args = list(args) + [unwrapped]
+        
+        # Pass the specified args, and lastly the unwrapped value, to a new Toil
+        # job that runs after the unwrapping job.
+        job_fn_job = self.unpack_resolve_job.addFollowOnJobFn(job_fn, *args,
+            **kwargs)
+            
+        # Now wrap this new job as a promise and return that
+        return ToilPromise.wrap(job_fn_job)
+        
     def set_executor(self, executor):
         """
         Set the given function to run in the promise. It will call its first
@@ -168,8 +195,11 @@ class ToilPromise(object):
         You can get the Toil return value .rv() for just its resolve value, or
         None if it rejects.
         
+        This is basically the same as .unwrap()(1), using Toil's built-in
+        promise indexing, but with some extra checks.
+        
         You can use this to convert from promises back to normal Toil style
-        code.
+        code, but if a converted promise rejects, it will kill the workflow.
         
         Should only be used in the parent job of the entire promise tree.
         
@@ -178,9 +208,10 @@ class ToilPromise(object):
         assert(self.promise_job is not None)
         
         if self.unpack_resolve_job is None:
-            # We need to add an extra follow-on to grab the resolve value (0th returned)
+            # We need to add an extra follow-on to grab the resolve value, or
+            # fail if it rejected.
             self.unpack_resolve_job = self.promise_job.addFollowOnJobFn(
-                index_job, self.promise_job.rv(), 0)
+                get_resolve_value_job, self.promise_job.rv())
                 
         # Once that job exists once, we can just grab its rv().
         return self.unpack_resolve_job.rv()
@@ -454,12 +485,16 @@ def promise_all_job(job, promise, result_pairs):
     # Return what the promise resolved/rejected with
     return (promise.result, promise.err)
     
-def index_job(job, collection, item):
+def get_resolve_value_job(job, resolve_reject):
     """
-    Grab the item at the given index and return it, as a Toil job.
+    Grab the resolve value from a promise job's resolve, reject return pair.
+    Fail if the promise rejected.
     """
     
-    return collection[item]
+    # Make sure the promise resolved
+    assert(resolve_reject[1] is None)
+    # Unpack the resolved value
+    return resolve_reject[0]
 
 
 
