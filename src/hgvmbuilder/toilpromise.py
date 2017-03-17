@@ -65,34 +65,6 @@ class ToilPromise(object):
         # We might get an extra return value unpacking job
         self.unpack_resolve_job = None
         
-        # This is the list of Promises that need to know about our Toil job and
-        # so need to be start()'ed after we start() and make our job.
-        self.dependents = []
-        
-        # We hold on to a Toil job to run as a child of, so we can schedule
-        # ourselves after our handlers are added.
-        self.parent_job = None
-        
-        # We could instead run as a follow-on of a Toil job.
-        self.prev_job = None
-        
-        # We could instead have a Toil job we schedule ourselves after to
-        # resolve with the return value.
-        self.wrapped_job = None
-        
-        # We could instead be waiting for a single promise, which needs to be
-        # .start()ed before us.
-        self.prev_promise = None
-        
-        # We could instead be waiting for a bunch of promises, all of which need
-        # to be .start()ed before us.
-        self.wait_for = None
-        
-        # These are promises that are waiting on us, and which need to be
-        # start()'ed when we are start()'ed so they can see if all their
-        # dependencies have started yet.
-        self.waiting_on_us = []
-        
     def __getstate__(self):
         """
         Return a tuple of state to be pickled.
@@ -117,21 +89,13 @@ class ToilPromise(object):
         
         # Make the new promise
         child = ToilPromise()
-        
-        # When this promise's executor calls its resolve, then we can run the
-        # child's then handler.
-        
         # Save the handler function
         child.set_then_handler(handler)
         
-        # The child needs to be a follow-on of our job, when we get a job
-        child.set_prev_promise(self)
-        
-        # And it's a dependent of us, so when we start it will start
-        self.add_dependent(child)
-        
-        # Assuming we were started, start the child.
-        child.start()
+        # Make the promise's job as a follow-on of ours, getting our return
+        # value.
+        child.promise_job = self.promise_job.addFollowOnJobFn(promise_then_job,
+            child, self.promise_job.rv())
         
         return child
         
@@ -153,165 +117,6 @@ class ToilPromise(object):
         
         # Pickle the function and save it
         self.then_dill = dill.dumps(then_handler)
-        
-    def set_wrapped(self, job):
-        """
-        Wrap the given Toil job. Resolve when it finishes with its return value.
-        We should not have an executor set.
-        """
-        
-        # Make sure we have no real executor
-        assert(self.executor_dill is None)
-        
-        self.wrapped_job = job
-        
-        
-    def set_parent_job(self, parent_job):
-        """
-        Make the Promise be a child of the given parent Toil job, where it will
-        run its executor or resolve to its set value.
-        
-        """
-        
-        assert(self.executor_dill is not None or self.result is not None)
-        
-        self.parent_job = parent_job
-        
-    def set_prev_job(self, prev_job):
-        """
-        Make the Promise be a follow-on of the given predecessor Toil job, where
-        it will run its executor or resolve to its set value.
-        
-        """
-        
-        assert(self.executor_dill is not None or self.result is not None)
-        
-        self.prev_job = prev_job
-        
-    def set_prev_promise(self, prev_promise):
-        """
-        Make the Promise be a follow-on of the given predecessor promise, where
-        it will run its then handler.
-        
-        """
-        
-        # We must have a then handler
-        assert(self.then_dill is not None)
-        
-        self.prev_promise = prev_promise
-        
-    def set_wait_for(self, promises):
-        """
-        Set this Promise to wait for all the given promises and then resolve
-        with their results.
-        """
-        
-        self.wait_for = promises
-        
-    def add_dependent(self, promise):
-        """
-        Remember to start() the given promise after we start() and make our Toil
-        job to depend on.
-        """
-        
-        self.dependents.append(promise)
-        
-    def start(self):
-        """
-        We're done adding handlers, so pickle the promise and schedule it in
-        Toil. Also make sure to schedule anything that depends on it.
-        
-        All the promises need to be start()ed in the Toil job that defined the
-        whole promise graph, because they need to create their jobs so they can
-        be linked up in the dependency graph.
-        
-        """
-        
-        # TODO: This really ought to be polymorphism based on type instead of
-        # dispatch based on filled fields.
-        
-        if self.promise_job is None:
-            # Haven't made a Toil job yet, so try it.
-        
-            if self.parent_job is not None and self.result is not None:
-                # We want a promise that always resolves, as a child job.
-                self.promise_job = self.parent_job.addChildJobFn(
-                    promise_resolve_job, self)
-                    
-            elif self.prev_job is not None and self.result is not None:
-                # We want a promise that always resolves, as a followon job.
-                self.promise_job = self.prev_job.addFollowOnJobFn(
-                    promise_resolve_job, self)
-                    
-            elif self.parent_job is not None and self.executor_dill is not None:
-                # We want to run this executor closure under this job as a child
-                self.promise_job = self.parent_job.addChildJobFn(
-                    promise_executor_job, self)
-                
-            elif self.prev_job is not None and self.executor_dill is not None:
-                # We want to run this executor closure under this job as a
-                # follow-on
-                self.promise_job = self.prev_job.addFollowOnJobFn(
-                    promise_executor_job, self)
-                    
-            elif self.prev_promise is not None and self.then_dill is not None:
-                # We are handling a .then() promise that depends on one parent.
-                # We assume the parent is started, and add as a follow-on.
-                self.promise_job = \
-                    self.prev_promise.promise_job.addFollowOnJobFn(
-                    promise_then_job, self, self.prev_promise.promise_job.rv())
-                    
-            elif self.wrapped_job is not None and self.executor_dill is None:
-                # We want to wrap this Toil job
-                self.promise_job = self.wrapped_job.addFollowOnJobFn(
-                    promise_wrapper_job, self, self.wrapped_job.rv())
-                    
-            elif self.wait_for is not None and self.executor_dill is None:
-                # We want to run after all these started promises and resolve with
-                # their results.
-                
-                
-                # Have all the promises we need to wait for been start()'ed?
-                all_started = True
-                
-                # Make a list of all the Toil RVs to wait for. Each is a pair of
-                # result and error from the promises we are waiting on.
-                rv_list = []
-                
-                for waited in self.wait_for:
-                    if waited.promise_job is not None:
-                        # This dependency has start()'ed
-                        rv_list.append(waited.promise_job.rv())
-                    else:
-                        all_started = False
-                        
-                if all_started:
-                    # We can actually schedule!
-                    
-                    # Make a job to resolve us with all the successes, or reject
-                    # us with the failures
-                    self.promise_job = Job.wrapJobFn(promise_all_job, self,
-                        rv_list)
-                    
-                    # Schedule it after all the promises it is supposed to wait
-                    # for.
-                    for waited in self.wait_for:
-                        waited.promise_job.addFollowOn(self.promise_job)
-                
-            else:
-                raise RuntimeError("Invalid promise configuration!")
-          
-        if self.promise_job is not None:
-            # Our dependencies are all ready, so we are too!
-            for dependent in self.dependents:
-                # Start the dependents, which may have jobs created for all their
-                # dependsencies now.
-                dependent.start()
-                
-        # TODO: everything should be started when it's made, since then handlers
-        # now live in their own promises. We can basically cut this function!
-        assert(self.promise_job is not None)
-            
         
     def handle_resolve(self, job, result):
         """
@@ -344,8 +149,8 @@ class ToilPromise(object):
         
     def unwrap(self):
         """
-        After a promise has been .start()'ed, you can get the Toil return value
-        .rv() for its resolve-value, reject-value pair.
+        You can get the Toil return value .rv() for its resolve-value, reject-
+        value pair.
         
         You can use this to convert from promises back to normal Toil style
         code.
@@ -357,11 +162,11 @@ class ToilPromise(object):
         assert(self.promise_job is not None)
         
         return self.promise_job.rv()
-        
+
     def unwrap_result(self):
         """
-        After a promise has been .start()'ed, you can get the Toil return value
-        .rv() for just its resolve value, or None if it rejects.
+        You can get the Toil return value .rv() for just its resolve value, or
+        None if it rejects.
         
         You can use this to convert from promises back to normal Toil style
         code.
@@ -389,8 +194,6 @@ class ToilPromise(object):
         or you will get EOFErrors from Toil's unpickling code! Access .rv()s in
         Promises with wrap!
         
-        Promise will need to be manually .start()'ed after handlers are added.
-        
         """
         
         # Don't use a lambda to always resolve, because the thing we want to
@@ -399,10 +202,10 @@ class ToilPromise(object):
         
         promise = ToilPromise()
         promise.result = result
-        promise.set_parent_job(parent_job)
         
-        # Since the parent job exists, we can make our job.
-        promise.start()
+        # Make the promise's job
+        promise.promise_job = parent_job.addChildJobFn(promise_resolve_job,
+            promise)
         
         return promise
         
@@ -419,37 +222,49 @@ class ToilPromise(object):
         
         promise = ToilPromise()
         promise.result = result
-        promise.set_prev_job(prev_job)
         
-        # Since the prev job exists, we can make our job.
-        promise.start()
+        # Make the promise's job
+        promise.promise_job = prev_job.addFollowOnJobFn(promise_resolve_job,
+            promise)
         
         return promise
             
     @staticmethod
     def all(promises):
         """
-        Produce a Promise that resolves when all the given promises resolve. The
-        promise resolves with all their results in a list.
+        Produce a Promise that resolves when all the given promises resolve.
+        Works on either a list of promises, or a dict of promises by some kind
+        of value key, and resolves to either a list of result values/reject
+        errors, or a dict of result values/reject errors by key.
         
         """
     
         # Make a Promise
         after_promise = ToilPromise()
-    
-        # We can't set it as a follow-on of anything until it has a job, and it
-        # can't have a job until it gets started in start. So we just remember
-        # the promises to wait for.
-        after_promise.set_wait_for(promises)
         
-        # But those promises won't have jobs to wait on until they start, so we
-        # need to register to be started by them.
-        for promise in promises:
-            promise.add_dependent(after_promise)
+        if isinstance(promises, list):
+            # Make a list of RVs
+            rv_struct = [waited.promise_job.rv() for waited in promises]
+            # And a set of unique jobs
+            unique_jobs = {waited.promise_job for waited in promises}
+        elif isinstance(promises, dict):
+            # Make a dict of RVs
+            rv_struct = {k: waited.promise_job.rv()
+                for k, waited in promises.iteritems()}
+            # And a set of unique jobs
+            unique_jobs = {waited.promise_job for waited in promises.values()}
+        else:
+            raise RuntimeError("Unsupported data structure for waiting on")
+            
         
-        # Assuming all the promises we wanted to depend on have started, start
-        # this one.
-        after_promise.start()
+         # Make a job to represent the promise, passing the data structure that
+         # will get filled in with the (resolve value, reject error) pairs.
+        after_promise.promise_job = Job.wrapJobFn(promise_all_job,
+            after_promise, rv_struct)
+            
+        for waited in unique_jobs:
+            # Run the promise's job after all the jobs it depends on
+            waited.addFollowOn(after_promise.promise_job)
         
         return after_promise
         
@@ -459,15 +274,13 @@ class ToilPromise(object):
         Produce a Promise that wraps the given normal Toil job, and resolves
         with its return value.
         
-        Promise will need to be manually .start()'ed after handlers are added.
-        
         """
         
         wrapper_promise = ToilPromise()
-        wrapper_promise.set_wrapped(toil_job)
         
-        # Since the wrapped job exists, we can make our job.
-        wrapper_promise.start()
+        # Make the promise's job
+        wrapper_promise.promise_job = toil_job.addFollowOnJobFn(
+            promise_wrapper_job, wrapper_promise, toil_job.rv())
         
         return wrapper_promise
         
@@ -479,16 +292,14 @@ class ToilPromise(object):
         The executor is a function that calls its first argument with a result,
         or its second argument with an error.
         
-        Promise will need to be manually .start()'ed after handlers are added.
-        
         """
         
         child_promise = ToilPromise()
         child_promise.set_executor(executor)
-        child_promise.set_parent_job(parent_job)
-        
-        # Since the parent job exists, we can make our job.
-        child_promise.start()
+
+        # Make the promise's job        
+        child_promise.promise_job = parent_job.addChildJobFn(
+            promise_executor_job, child_promise)
         
         return child_promise
         
@@ -500,16 +311,14 @@ class ToilPromise(object):
         The executor is a function that calls its first argument with a result,
         or its second argument with an error.
         
-        Promise will need to be manually .start()'ed after handlers are added.
-        
         """
         
         child_promise = ToilPromise()
         child_promise.set_executor(executor)
-        child_promise.set_prev_job(prev_job)
-        
-        # Since the prev job exists, we can make our job.
-        child_promise.start()
+
+        # Make the promise's job        
+        child_promise.promise_job = prev_job.addFollowOnJobFn(
+            promise_executor_job, child_promise)
         
         return child_promise
         
@@ -592,26 +401,48 @@ def promise_wrapper_job(job, promise, result):
     
 def promise_all_job(job, promise, result_pairs):
     """
-    Make the given promise resolve with the list of the first elements in all
-    the pairs, if the second elements are all none, or reject with a ist of the
-    second elements, if any are not None.
+    Operates on a data structure (list or dict) with (resolve result, reject
+    error) pairs as values.
+    
+    Make the given promise resolve with the struct of the first elements in all
+    the pairs, if the second elements are all none, or reject with a struct of
+    the second elements, if any are not None.
     
     Makes ToilPromise.all() work.
     """
     
-    # Looka t all the results
-    results = []
-    errs = []
+    # Did anything we depend on fail?
     failed = False
     
-    for result, err in result_pairs:
-        # Put the results and errors in the right list
-        results.append(result)
-        errs.append(err)
+    if isinstance(result_pairs, list):
+        # Swizzle out into lists
+        results = []
+        errs = []
         
-        if err is not None:
-            # If we have any errors we should fail
-            failed = True
+        for result, err in result_pairs:
+            # Put the results and errors in the right list
+            results.append(result)
+            errs.append(err)
+            
+            if err is not None:
+                # If we have any errors we should fail
+                failed = True
+                
+    elif isinstance(result_pairs, dict):
+        # Swizzle out into dicts
+        results = {}
+        errs = {}
+        
+        for key, (result, err) in result_pairs.iteritems():
+            # Put the results and errors in the right list
+            results[key] = result
+            errs[key] = err
+            
+            if err is not None:
+                # If we have any errors we should fail
+                failed = True
+    else:
+        raise RuntimeError("Unsupported data structure!")
 
     if failed:
         # Fail the promise if anything in the list failed

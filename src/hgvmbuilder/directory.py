@@ -3,6 +3,7 @@
 import os
 import os.path
 import logging
+import urlparse
 
 Logger = logging.getLogger("directory")
 
@@ -43,6 +44,25 @@ class Directory(object):
         self.ids[file_name] = file_id
         
         Logger.info("Saved {} as {}".format(file_id, file_name))
+        
+        return self
+        
+    def mount(self, prefix, other):
+        """
+        Add all the files from the other directory into this one with the given
+        name prefix. A trailing slash will automatically be added if not
+        present.
+        
+        Can be chained.
+        """
+        
+        if not prefix.endswith("/"):
+            # Add the trailing slash if not specified already.
+            prefix = prefix + "/"
+        
+        for file_name, file_id in other.for_each_file():
+            # Stick each file in under the prefix.
+            self.add(prefix + file_name, file_id)
         
         return self
         
@@ -93,10 +113,27 @@ class Directory(object):
         
         Logger.info("Export directory to {}".format(base_url))
         
+        # We need to parse the URL so we can do special handling of file URLs
+        parsing = urlparse.urlparse(base_url)
+        
         for file_name, file_id in self.for_each_file():
-            # Export every file under the given base URL. TODO: catch when Toil
-            # is using file URLs and make it make subdirectories instead of
-            # crashing.
+            # Export every file under the given base URL.
+            
+            if parsing.scheme == "file":
+                # Hack to fix Toil not creating directories needed to hold the
+                # files it exports.
+                
+                # Work out what directory needs to hold this file
+                parent_directory = os.path.dirname(os.path.join(parsing.path,
+                    file_name))
+                try:
+                    # Then make sure it exists
+                    os.makedirs(parent_directory)
+                except OSError:
+                    pass
+                          
+            # Now that we know the directory exists if it's needed, export the
+            # file.
             toil_instance.exportFile(file_id, "{}/{}".format(base_url,
                 file_name))
                 

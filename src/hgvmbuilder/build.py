@@ -800,6 +800,89 @@ def realignment_stats_job(job, options, eval_plan, vg_id, gam_id):
         
     return stats_id
     
+def parse_realignment_stats_job(job, options, eval_plan, stats_id):
+    """
+    Parse the output of vg stats on a GAM. Returns two dicts.
+    
+    The first is a dict from stat name ("Insertions", Deletions",
+    ""Substitutions", "Softclips") to (bp, event count) pairs.
+    
+    The second is a dict from node status name ("Unvisited nodes", "Single-
+    visited nodes") to (bp, node count) pairs.
+    
+    """
+    
+    # Make the dict to fill in with stats
+    stats = {}
+    
+    # Make another dict to fill in with node visit status
+    node_status = {}
+    
+    # We have some regexes to catch lines we care about
+    
+    # These are alignment events
+    stats_regex = re.compile(R"(.+): (\d+) bp in (\d+) read events")
+    
+    # These are node statuses
+    node_regex = re.compile(R"(.+): (\d+)/(\d+) \((\d+) bp\)")
+    
+    with job.fileStore.readGlobalFileStream(stats_id) as stats_file:
+        for line in stats_file:
+            # For every line, see if it's a normal stat-giving line
+            stats_match = stats_regex.match(line.strip())
+            if stats_match:
+                # Put it in the dict as (bp, event count)
+                stats[stats_match.group(1)] = (int(stats_match.group(2)),
+                    int(stats_match.group(3)))
+                    
+            # Also see if it describes node visit statsu
+            node_match = node_regex.match(line.strip())
+            if node_match:
+                # Put it in the dict as (bp, node count), which is reverse from
+                # how it comes in.
+                node_status[node_match.group(1)] = (int(node_match.group(3)),
+                    int(node_match.group(2)))
+            
+    # Return the completed dictionaries
+    return stats, node_status
+            
+def measure_graph_job(job, options, vg_id):
+    """
+    Measue the given graph with vg stats. Return a pair of (bp size, node
+    count).
+    """
+    
+    # Download just the vg
+    vg_filename = job.fileStore.readGlobalFile(vg_id)
+    
+    # Set up the VG run
+    vg_args = ["vg", "stats", "--size", "--length", vg_filename]
+    
+    # Call and stream the Locus data to the file store
+    stats = options.drunner.call([vg_args], check_output = True)
+    
+    # Fill in these stat variables
+    bp_length = None
+    node_count = None
+    
+    for line in stats.split("\n"):
+        # Break each line on the tab
+        parts = line.split("\t")
+        
+        if len(parts) < 2:
+            # Skip tiny nonsense lines
+            continue
+        
+        if parts[0] == "length":
+            # Parse the total length
+            bp_length = int(parts[1])
+            
+        if parts[0] == "nodes":
+            # Parse the total node count
+            node_count = int(parts[1])
+            
+    # Return the two metrics of graph size
+    return bp_length, node_count
     
 def hgvm_eval_job(job, options, eval_plan, hgvm):
     """
@@ -812,74 +895,128 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
     
     RealtimeLogger.info("Evaluating HGVM")
     
-    results = Directory()
-    
     if len(eval_plan.get_fastq_ids()) > 0:
-        # If we have reads, align them
-        align_job = job.addChildJobFn(align_to_hgvm_job, options, eval_plan,
-            hgvm, fastqs=eval_plan.get_fastq_ids(),
-            cores=16, memory="50G", disk="100G")
-        # Put it in a Directory in a promise
-        align_promise = ToilPromise.wrap(align_job).then(
-            lambda id: Directory({"aligned.gam": id}))
+        # If we have reads, we can do an evaluation
         
-        # Then do the pileup
-        pileup_job = align_job.addFollowOnJobFn(pileup_on_hgvm_job, options,
-            eval_plan, hgvm, align_job.rv(),
-            cores=1, memory="50G", disk="100G")
-        # Put it in a Directory in a promise
-        pileup_promise = ToilPromise.wrap(pileup_job).then(
-            lambda id: Directory({"pileup.vgpu": id}))
+        # We'll fill this in with all the graphs we want to test, as packaged
+        # HGVM directories or .rv() promises for them.
+        graphs_to_test = {"experimental": hgvm}
         
-        # Then do the calling
-        call_job = pileup_job.addFollowOnJobFn(call_on_hgvm_job, options,
-            eval_plan, hgvm, pileup_job.rv(),
-            cores=1, memory="50G", disk="50G")
-        # And a promise for the call results directory.
-        call_promise = ToilPromise.wrap(call_job)
+        # This will hold promises for evaluation directories, by condition name.
+        eval_promises = {}
         
-        # Then subset the graph and get the new VG id and put it in a directory
-        # Then do the calling
-        subset_job = call_job.addFollowOnJobFn(subset_graph_job, options,
-            eval_plan, call_job.rv(),
-            cores=1, memory="50G", disk="50G")
-        # And a promise for the call results directory.
-        subset_promise = ToilPromise.wrap(subset_job).then(
-            lambda id: Directory({"sample.vg": id}))
+        # This will hold promises for parsed stat dict pairs from
+        # parse_realignment_stats_job, by condition name.
+        stats_promises = {}
+        
+        # This holds a ToilPromise for either the control graph's length in bp, or
+        # None if no control graph is specified.
+        control_length_promise = None
+        
+        if eval_plan.get_control_graph_id() is not None:
+            # Add in the control. TODO: assumes it is already indexed. We should
+            # check and index it if it's not.
+            graphs_to_test["control"] = eval_plan.get_packaged_control()
             
-        # Make a list of all the output directory promises to squash together.
-        dir_promises = [align_promise, pileup_promise, call_promise,
-            subset_promise]
-            
-        if eval_plan.get_eval_sequences_id() is not None:
-            # We should realign these sequences
-            
-            # First reindex and package the sample itself as an HGVM
-            package_job = subset_job.addFollowOnJobFn(
-                graph_to_hgvm_job, options, subset_job.rv())
-            
-            # Then realign and grab the realigned GAM
-            realign_job = package_job.addFollowOnJobFn(align_to_hgvm_job, options, eval_plan,
-                package_job.rv(), sequences=eval_plan.get_eval_sequences_id(),
+            # Get a promise for the control's length
+            control_length_promise=ToilPromise.wrap(job.addChildJobFn(
+                measure_graph_job, options,
+                eval_plan.get_control_graph_id(),
+                cores=1, memory="50G", disk="50G"))
+        else:
+            # Say we can't know the control's length
+            control_length_promise = ToilPromise.resolve(job, None)
+        
+        for condition, package in graphs_to_test.iteritems():
+            # Looping over the experimental and the control...
+        
+            align_job = job.addChildJobFn(align_to_hgvm_job, options, eval_plan,
+                hgvm, fastqs=eval_plan.get_fastq_ids(),
                 cores=16, memory="50G", disk="100G")
-                
-            # Then get the stats
-            stats_job = realign_job.addFollowOnJobFn(realignment_stats_job,
-                options, eval_plan, subset_job.rv(), realign_job.rv(),
-                cores=1, memory="50G", disk="100G")
-            # And put them in a directory
-            stats_promise = ToilPromise.wrap(stats_job).then(
-                lambda id: Directory({"stats.tsv": id}))
+            # Put it in a Directory in a promise
+            align_promise = ToilPromise.wrap(align_job).then(
+                lambda id: Directory({"aligned.gam": id}))
             
-            # And merge it with the others
-            dir_promises.append(stats_promise)
+            # Then do the pileup
+            pileup_job = align_job.addFollowOnJobFn(pileup_on_hgvm_job, options,
+                eval_plan, hgvm, align_job.rv(),
+                cores=1, memory="50G", disk="100G")
+            # Put it in a Directory in a promise
+            pileup_promise = ToilPromise.wrap(pileup_job).then(
+                lambda id: Directory({"pileup.vgpu": id}))
+            
+            # Then do the calling
+            call_job = pileup_job.addFollowOnJobFn(call_on_hgvm_job, options,
+                eval_plan, hgvm, pileup_job.rv(),
+                cores=1, memory="50G", disk="50G")
+            # And a promise for the call results directory.
+            call_promise = ToilPromise.wrap(call_job)
+            
+            # Then subset the graph and get the new VG id and put it in a directory
+            # Then do the calling
+            subset_job = call_job.addFollowOnJobFn(subset_graph_job, options,
+                eval_plan, call_job.rv(),
+                cores=1, memory="50G", disk="50G")
+            # And a promise for the call results directory.
+            subset_promise = ToilPromise.wrap(subset_job).then(
+                lambda id: Directory({"sample.vg": id}))
+                
+            # Make a list of all the output directory promises to squash together.
+            dir_promises = [align_promise, pileup_promise, call_promise,
+                subset_promise]
+                
+            if eval_plan.get_eval_sequences_id() is not None:
+                # We should realign these sequences
+                
+                # First reindex and package the sample itself as an HGVM
+                package_job = subset_job.addFollowOnJobFn(
+                    graph_to_hgvm_job, options, subset_job.rv())
+                
+                # Then realign and grab the realigned GAM
+                realign_job = package_job.addFollowOnJobFn(align_to_hgvm_job, options, eval_plan,
+                    package_job.rv(), sequences=eval_plan.get_eval_sequences_id(),
+                    cores=16, memory="50G", disk="100G")
+                    
+                # Then get the stats
+                stats_job = realign_job.addFollowOnJobFn(realignment_stats_job,
+                    options, eval_plan, subset_job.rv(), realign_job.rv(),
+                    cores=1, memory="50G", disk="100G")
+                # And put them in a directory
+                stats_promise = ToilPromise.wrap(stats_job).then(
+                    lambda id: Directory({"stats.tsv": id}))
+                # And merge it with the others
+                dir_promises.append(stats_promise)
+                
+                # Then parse them
+                stats_parse_job = stats_job.addFollowOnJobFn(
+                    parse_realignment_stats_job,
+                    options, eval_plan, stats_job.rv())
+                # And make a promise
+                parsed_stats_promise = ToilPromise.wrap(stats_parse_job)
+                    
+                # TODO: Then take the parsed stats and the control length, and feed
+                # them to a function
+                parsed_stats_promise.then(lambda pair: RealtimeLogger.info("Parsed stats: {}".format(pair)))
+                control_length_promise.then(lambda length: RealtimeLogger.info("Control length: {}".format(length)))
         
-        # Collect the result directories and merge them, and return the result
-        return ToilPromise.all(dir_promises).then(
-            lambda dirs: dirs[0].merge(*dirs[1:])).unwrap_result()
+            # Collect the result directories and merge them. Store a promise for
+            # that directory under the condition name we are doing.
+            eval_promises[condition] = ToilPromise.all(dir_promises).then(
+                lambda dirs: dirs[0].merge(*dirs[1:]))
+                
+        # Now we have evaluated all the conditions
+        
+        # Mount each condition's own directory in the eval directory, and return
+        # the resulting directory.
+        def mount_all(dirs_by_condition):
+            root = Directory()
+            for condition, directory in dirs_by_condition.iteritems():
+                root.mount(condition, directory)
+            return root
+        return ToilPromise.all(eval_promises).then(mount_all).unwrap_result()
 
     # Otherwise return this empty directory
-    return results
+    return Directory()
     
 def main_job(job, options, plan, eval_plan):
     """
@@ -963,19 +1100,12 @@ def main(args):
             # Run the root job and get the packaged HGVM and its evaluation as
             # Directories.
             hgvm_directory, eval_directory = toil_instance.start(root_job)
-            
-        try:
-            # Make sure the output directory exists
-            os.makedirs(options.out_dir + "/eval")
-        except OSError:
-            # It may exist already
-            pass
+        
+        # Stick the evaluations in the HGVM directory for now
+        hgvm_directory.mount("eval", eval_directory)
             
         # Export the HGVM
         hgvm_directory.export(toil_instance, "file:{}".format(options.out_dir))
-        # And stick its evaluations inside it for now
-        eval_directory.export(toil_instance,
-            "file:{}/eval".format(options.out_dir))
         
     print("Toil workflow complete")
     return 0

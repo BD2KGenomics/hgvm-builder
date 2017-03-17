@@ -2,6 +2,8 @@
 
 import logging
 
+from .directory import Directory
+
 Logger = logging.getLogger("evaluation")
 
 class EvaluationPlan(object):
@@ -146,6 +148,24 @@ class EvaluationPlan(object):
         """
         
         return self.eval_sequences_id
+        
+    def get_packaged_control(self):
+        """
+        Package up the control graph from the evaluation plan as a Directory.
+        Assumes the control index was already provided.
+        
+        """
+        
+        vg_id = self.get_control_graph_id()
+        
+        package = Directory({
+            "hgvm.vg": vg_id,
+            "hgvm.xg": self.get_xg_id(vg_id),
+            "hgvm.gcsa": self.get_gcsa_id(vg_id),
+            "hgvm.gcsa.lcp": self.get_lcp_id(vg_id)
+        })
+        
+        return package
         
     def bake(self, import_function):
         """
