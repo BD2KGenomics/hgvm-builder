@@ -207,7 +207,7 @@ class EvaluationPlan(object):
             if (self.control_graph_gcsa_url is not None and
                 self.control_graph_gcsa_lcp_url is not None):
                 # Grab the control graph gcsa/lcp index since it exists
-                self.gcsa_lcp_ids = (
+                self.gcsa_lcp_ids[self.control_graph_id] = (
                     import_function(self.control_graph_gcsa_url),
                     import_function(self.control_graph_gcsa_lcp_url))
         else:
