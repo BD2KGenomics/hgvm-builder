@@ -4,6 +4,7 @@ import os
 import os.path
 import logging
 import urlparse
+import shutil
 
 Logger = logging.getLogger("directory")
 
@@ -138,6 +139,47 @@ class Directory(object):
                 file_name))
                 
         return self
+    
+    def dump(self, file_store, base_path):
+        """
+        Dump the directory from the given file store to the given filesystem
+        path, so that the file store can't clean it up and it actually sticks
+        around on disk.
+        
+        The target path should be absolute, because the job's working directory
+        is probably in some kind of sandbox.
+        
+        Can be chained.
+        """
+        
+        Logger.info("Dumping directory to {}".format(base_path))
+        
+        for file_name, file_id in self.for_each_file():
+            # For every file
+            
+            # Compute its destination local filename
+            local_name = os.path.join(base_path, file_name)
+            
+            # Work out the directory part
+            local_dirname = os.path.dirname(local_name)
+            
+            if not os.path.exists(local_dirname):
+                # If the file needs to go in a directory that doesn't exist
+                try:
+                    # Make it
+                    os.makedirs(local_dirname)
+                except:
+                    # But don't worry if someone else made it first
+                    pass
+            
+            # Actually download the file to a temp directory.
+            temp_name = file_store.readGlobalFile(file_id)
+            
+            # Copy it to the right place, fixing symlink-ness, etc.
+            shutil.copy(temp_name, local_name)
+            
+        return self
+        
                 
     def download(self, file_store, base_path):
         """
@@ -168,8 +210,8 @@ class Directory(object):
                     # But don't worry if someone else made it first
                     pass
             
-            # Actually download the file to the given directory. TODO: can this
-            # result in a broken symlink if the joibstore goes away?
+            # Actually download the file to the given directory. TODO: the
+            # file_store may delete it later!
             file_store.readGlobalFile(file_id, local_name)
             
         return self

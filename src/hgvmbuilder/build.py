@@ -106,6 +106,8 @@ def parse_args(args):
     # Output
     parser.add_argument("out_dir",
         help="directory to place the constructed graph parts in")
+    parser.add_argument("--dump_hgvm", default=None, type=os.path.abspath,
+        help="dump the HGVM build to the given directory")
     
     # The command line arguments start with the program name, which we don't
     # want to treat as an argument for argparse. So we remove it.
@@ -655,6 +657,12 @@ def hgvm_build_job(job, options, plan):
         merge_job.rv(), xg_job.rv(), gcsa_job.rv(),
         cores=1, memory="2G", disk="1G")
     gcsa_job.addFollowOn(directory_job)
+    
+    if options.dump_hgvm is not None:
+        # And another job to dump it
+        def dump(job, hgvm):
+            hgvm.dump(job.fileStore, options.dump_hgvm)
+        ToilPromise.wrap(directory_job).then_job_fn(dump)
     
     # Return the Directory with the packaged HGVM
     return directory_job.rv()

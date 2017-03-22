@@ -5,6 +5,8 @@ import os.path
 import logging
 import dill
 import itertools
+import sys
+import traceback
 
 from toil.job import Job
 from toil.realtimeLogger import RealtimeLogger
@@ -110,21 +112,29 @@ class ToilPromise(object):
         If the promise rejects, the added Toil job may still be called, with a
         None argument.
         
+        Makes sure to pickle the function, so it can be a lambda.
+        
         """
         
-        # Unwrap our result, and create the unwrapping job
-        unwrapped = self.unwrap_result()
+        # Make the new promise
+        child = ToilPromise()
+        # Save the handler function
+        child.set_then_handler(job_fn)
         
-        # Stick it on the extra agrs list at the end, so it comes last.
-        args = list(args) + [unwrapped]
+        # Stick the result, error pair from the last promise at the end of any
+        # forwarded args, where the handler expects the result to end up.
+        args = list(args) + [self.promise_job.rv()]
         
-        # Pass the specified args, and lastly the unwrapped value, to a new Toil
-        # job that runs after the unwrapping job.
-        job_fn_job = self.unpack_resolve_job.addFollowOnJobFn(job_fn, *args,
-            **kwargs)
-            
-        # Now wrap this new job as a promise and return that
-        return ToilPromise.wrap(job_fn_job)
+        
+        # Make the promise's job as a follow-on of ours, getting our return
+        # value.
+        child.promise_job = self.promise_job.addFollowOnJobFn(
+            promise_then_job_fn_job, child, *args, **kwargs)
+        
+
+        # Return the child, which looks like a then handler but is associated
+        # with a different kind of Toil job.
+        return child
         
     def set_executor(self, executor):
         """
@@ -171,7 +181,6 @@ class ToilPromise(object):
         # Check if we have any reject handlers
         # If so call them
         # If not throw an error that stops the workflow
-        
         raise err
         
     def unwrap(self):
@@ -409,6 +418,50 @@ def promise_then_job(job, promise, prev_promise_returned):
             promise.handle_resolve(job, result)
         except Exception as e:
             # Reject with an error if there is one
+            Logger.error("".join(traceback.format_exception(*sys.exc_info())))
+            promise.handle_reject(job, e)
+            
+    else:
+        # Parent promise rejected so we should not run
+        # Bubble up the error
+        promise.handle_reject(job, rejected)
+        
+    return (promise.result, promise.err)
+    
+def promise_then_job_fn_job(job, promise, *args, **kwargs):
+    """
+    Toil job that runs a promise created with a then_job_fn handler.
+    
+    Takes the promise, and the arguments to forward along to the handler, the
+    last of which is the (result, error) pair from the last promise which gets
+    processed to just a result.
+    
+    Returns the promise's success result and error, as a pair.
+    """
+    
+    
+    # The pickled handler in this case takes a bunch of arguments: the Toil job,
+    # and the success result from the last promise, and then any other arguments
+    # or kwargs that the user wanted to pass along.
+    then_handler = dill.loads(promise.then_dill)
+    
+    # Pull out the results from the last promise
+    resolved, rejected = args[-1]
+    args = args[:-1]
+    
+    if rejected is None:
+        # Actually run this child promise
+        
+        # Stick the resolved value on
+        args = list(args) + [resolved]
+        
+        try:
+            # Get the result from the then handler and resolve with it
+            result = then_handler(job, *args, **kwargs)
+            promise.handle_resolve(job, result)
+        except Exception as e:
+            # Reject with an error if there is one
+            Logger.error("".join(traceback.format_exception(*sys.exc_info())))
             promise.handle_reject(job, e)
             
     else:
