@@ -22,6 +22,7 @@ import subprocess
 import sys
 import collections
 import itertools
+import shutil
 
 import tsv
 
@@ -81,6 +82,10 @@ def parse_args(args):
         help="single VCF for a particular chromosome")
     parser.add_argument("--vcf_contig", action="append", default=[],
         help="contig/chromosome for the corresponding VCF")
+    # We can just skip construction proper and import an HGVM pre-packaged from
+    # a directory.
+    parser.add_argument("--hgvm_url", default=None,
+        help="just import the given pre-built HGVM for evaluation")
         
     # For evaluation
     parser.add_argument("--control_graph_url", default=None,
@@ -115,11 +120,16 @@ def parse_args(args):
         
     return parser.parse_args(args)
    
-def create_plan(assembly_url, vcfs_urls, vcf_urls, vcf_contigs, hal_url, base_vg_url):
+def create_plan(assembly_url, vcfs_urls, vcf_urls, vcf_contigs, hal_url,
+    base_vg_url, hgvm_url):
     """
     Given an FTP or file url to the root of a GRC-format assembly_structure
-    directory tree, and an FTP or file URL to a directory of chrXXX VCFs,
-    produce a ReferencePlan describing that assembly and those VCFs.
+    directory tree, a list of FTP or file URLs to directories of chrXXX VCFs, a
+    list of URLs to individual VCFs to include, a list of contigs to assign
+    those VCFs to, a HAL URL to import, and a pre-built HGVM directory URL to
+    import, produce a ReferencePlan describing the HGVM we want.
+    
+    Generally not all of those will be in use at the same time.
     """
     
     # Make the plan
@@ -148,6 +158,11 @@ def create_plan(assembly_url, vcfs_urls, vcf_urls, vcf_contigs, hal_url, base_vg
     if base_vg_url is not None:
         # We have a VG file already converted from HAL
         plan.add_base_vg(base_vg_url)
+        
+    if hgvm_url is not None:
+        # We just want to use this HGVM we have prepared earlier.
+        plan.set_hgvm(hgvm_url)
+    
     
     # Return the completed plan
     return plan
@@ -620,6 +635,17 @@ def hgvm_build_job(job, options, plan):
     
     """
     
+    if plan.hgvm_directory is not None:
+        # We have something to just import
+        RealtimeLogger.info("Using imported HGVM")
+        
+        if options.dump_hgvm is not None:
+            # Dump it again. TODO: unify dump logic
+            plan.hgvm_directory.dump(job.fileStore, options.dump_hgvm)
+        
+        return plan.hgvm_directory
+    
+    # Otherwise we have to build it
     RealtimeLogger.info("Building HGVM")
     
     # Make a child to convert the HALs and merge the VGs
@@ -667,16 +693,165 @@ def hgvm_build_job(job, options, plan):
     # Return the Directory with the packaged HGVM
     return directory_job.rv()
     
+def merge_gam_job(job, options, gam_ids):
+    """
+    Merge zero or more GAM files into one by concatenation. Returns the merged
+    file ID.
+    
+    """
+    
+    with job.fileStore.writeGlobalFileStream() as (gam_handle, gam_id):
+        # Make one merged file
+        
+        for part_id in gam_ids:
+            # For each part GAM
+            with job.fileStore.readGlobalFileStream(part_id) as part_handle:
+                # Open it
+                
+                # And stream it to the combined GAM
+                shutil.copyfileobj(part_handle, gam_handle)
+    
+    return gam_id
+    
+def split_records_job(job, options, file_ids, lines_per_record=4,
+    records_per_part=100000):
+    """
+    Split files that have a certain number of lines per record. Takes a list of
+    file IDs, and a lines per record count. The default is set up for FASTQ
+    files that have 4 lines per record.
+    
+    Each file in the list will be split at the same number of records, given by
+    records_per_part.
+    
+    Returns a list of lists of corresponding parts of different input files. So
+    if you pass in two files, the first parts of the files are in the first
+    list, the second parts of the files are in the second list, and so on.
+    
+    TODO: replace with a real FASTQ parser that can handle valid FASTQs that
+    wrap over more than 4 lines.
+    """
+    
+    if len(file_ids) == 0:
+        # Super easy to split no files.
+        return []
+    
+    # Download the files
+    file_names = [job.fileStore.readGlobalFile(x) for x in file_ids]
+    
+    # Measure the first file
+    line_count = int(options.drunner.call([["wc", "-l", file_names[0]],
+        ["cut", "-f", "1", "-d", " "]],
+        check_output = True))
+    
+    # There may not be any partial records
+    assert(line_count % lines_per_record == 0)
+    
+    # Work out how many actual parts we need
+    whole_parts, partial_parts = divmod(line_count,
+        lines_per_record * records_per_part)
+    part_count = whole_parts + int(bool(partial_parts))
+    
+    # This holds a list for each chunk of all the files' chunks, as file IDs
+    part_lists = []
+    
+    # This holds the file IDs for the chunk currently being worked on
+    part_list = []
+    
+    # Open all the files to chunk
+    input_handles = [open(x) for x in file_names]
+    
+    for i in xrange(part_count):
+        # For each part we need to do
+    
+        for input_handle in input_handles:
+            # For each file that's open
+            with job.fileStore.writeGlobalFileStream() as (chunk_handle, chunk_id):
+                # Open a chunk file to fill in
+                for line in itertools.islice(input_handle,
+                    records_per_part * lines_per_record):
+                    # Read to the end or to the requested number of records
+                    
+                    # And put them in the chunk file
+                    chunk_handle.write(line)
+                
+                # Finish the chunk and stick it in its list
+                part_list.append(chunk_id)
+        
+        # Now we have a whole set of corresponding parts, so send it out
+        part_lists.append(part_list)
+        part_list = []
+    
+    for input_handle in input_handles:
+        # Make sure all the files are empty now. They all should have had the same length.
+        assert(not input_handle.read(1))
+        
+    # Return the list of lists of corresponding chunks
+    return part_lists
+    
+def align_to_hgvm_chunked_job(job, options, eval_plan, hgvm, fastqs=[],
+    sequences=None):
+    """
+    Align either a single or a pair of paired FASTQs, or a file of sequences,
+    one per line, to an HGVM represented as a Directory.
+    
+    Only one of sequences and fastqs will be used.
+    
+    Return the GAM file ID.
+    
+    Aligns in multiple chunks
+    """
+    
+    if sequences is not None:
+        # We're using sequence files
+        
+        split_job = job.addChildJobFn(split_records_job, options, [sequences],
+            lines_per_record=1, cores=1, memory="4G", disk="100G")
+        
+    else:
+        # We must be using fastqs
+        split_job = job.addChildJobFn(split_records_job, options, fastqs,
+            lines_per_record=4, cores=1, memory="4G", disk="100G")
+          
+    # We define this little inline job to actually do the alignments once the
+    # splitting happens
+    def do_alignments(job, parts):
+        # This holds the .rv()s for the aligned GAM files
+        rvs = []
+        for part_list in parts:
+            if sequences is not None:
+                # Use the one-element parts lists as sequence files
+                rvs.append(job.addChildJobFn(align_to_hgvm_job, options,
+                    eval_plan, hgvm, sequences=part_list[0],
+                    cores=16, memory="50G", disk="100G").rv())
+            else:
+                # Use the multi-element parts lists as FASTQs
+                rvs.append(job.addChildJobFn(align_to_hgvm_job, options,
+                    eval_plan, hgvm, fastqs=part_list,
+                    cores=16, memory="50G", disk="100G").rv())
+        # Return all the aligned parts
+        return rvs
+            
+    # After splitting, do all the alignments, then merge the GAMs and return
+    # that
+    return ToilPromise.wrap(split_job).then_job_fn(do_alignments).then_job_fn(
+        merge_gam_job, options).unwrap_result()
+    
+    
+    
+    
 def align_to_hgvm_job(job, options, eval_plan, hgvm, fastqs=[], sequences=None):
     """
     Align either a single or a pair of paired FASTQs, or a file of sequences,
     one per line, to an HGVM represented as a Directory.
     
     Return the GAM file ID.
+    
+    Does the whole alignment as a single job.
     """
     
     # Download the HGVM
     hgvm_dir = job.fileStore.getLocalTempDir()
+    RealtimeLogger.info("Download {} to {}".format(repr(hgvm), hgvm_dir))
     hgvm.download(job.fileStore, hgvm_dir)
     
     # Prepare some args to align to the HGVM
@@ -988,8 +1163,8 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
         for condition, package in graphs_to_test.iteritems():
             # Looping over the experimental and the control...
         
-            align_job = job.addChildJobFn(align_to_hgvm_job, options, eval_plan,
-                hgvm, fastqs=eval_plan.get_fastq_ids(),
+            align_job = job.addChildJobFn(align_to_hgvm_chunked_job, options,
+                eval_plan, hgvm, fastqs=eval_plan.get_fastq_ids(),
                 cores=16, memory="50G", disk="100G")
             # Put it in a Directory in a promise
             align_promise = ToilPromise.wrap(align_job).then(
@@ -1031,8 +1206,9 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
                     graph_to_hgvm_job, options, subset_job.rv())
                 
                 # Then realign and grab the realigned GAM
-                realign_job = package_job.addFollowOnJobFn(align_to_hgvm_job,
-                    options, eval_plan, package_job.rv(),
+                realign_job = package_job.addFollowOnJobFn(
+                    align_to_hgvm_chunked_job, options, eval_plan,
+                    package_job.rv(),
                     sequences=eval_plan.get_eval_sequences_id(),
                     cores=16, memory="50G", disk="100G")
                     
@@ -1067,7 +1243,7 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
             # Control is already indexed and packaged.
             
             # Realign and grab the realigned GAM
-            realign_job = job.addChildJobFn(align_to_hgvm_job,
+            realign_job = job.addChildJobFn(align_to_hgvm_chunked_job,
                 options, eval_plan, graphs_to_test["control"],
                 sequences=eval_plan.get_eval_sequences_id(),
                 cores=16, memory="50G", disk="100G")
@@ -1177,7 +1353,7 @@ def main(args):
             # Build the plan on the head node
             plan = create_plan(options.assembly_url, options.vcfs_url,
                 options.vcf_url, options.vcf_contig, options.hal_url,
-                options.base_vg_url)
+                options.base_vg_url, options.hgvm_url)
                 
             # Also build the evaluation plan on the head node
             eval_plan = create_eval_plan(options.control_graph_url,
@@ -1201,7 +1377,9 @@ def main(args):
         hgvm_directory.mount("eval", eval_directory)
             
         # Export the HGVM
-        hgvm_directory.export(toil_instance, "file:{}".format(options.out_dir))
+        hgvm_directory.export_to(
+            lambda id, url: toil_instance.exportFile(id, url),
+            "file:{}".format(options.out_dir))
         
     print("Toil workflow complete")
     return 0

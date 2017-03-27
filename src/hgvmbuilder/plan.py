@@ -6,6 +6,8 @@ import collections
 
 import tsv
 
+from .directory import Directory
+
 Logger = logging.getLogger("plan")
 
 class ReferencePlan(object):
@@ -54,6 +56,8 @@ class ReferencePlan(object):
         self.vcf_urls = collections.defaultdict(list)
         # This holds a dict from VCF URL to VCF index URL
         self.vcf_index_urls = {}
+        # This holds a URL for an HGVM directory to just import wholesale
+        self.hgvm_url = None
         
         # After we load all the databases and import all the input files into
         # Toil, we populate these fields.
@@ -105,6 +109,9 @@ class ReferencePlan(object):
         self.base_vg_urls = []
         # And these are their IDs after uploading
         self.base_vg_ids = []
+        
+        # This holds the premade HGVM Directory object if we have one
+        self.hgvm_directory = None
         
     
     def add_hal(self, url):
@@ -206,15 +213,14 @@ class ReferencePlan(object):
         # Drop the last 4 characters to get the VCF name
         self.vcf_index_urls[url[:-4]] = url
         
-    def add_sample(self, fastq_url):
+    def set_hgvm(self, hgvm_url):
         """
-        Adds the given high coverage sample FASTQ as a sample to be aligned to
-        and used to augment the graph.
+        Set the given URL as the location to import the whole HGVM from.
         
-        TODO: Will be implemented after VCFs and assembled contigs work
         """
         
-        raise NotImplementedError
+        self.hgvm_url = hgvm_url
+        
         
     def chromosome_name_to_accession(self, chromosome_name):
         """
@@ -349,6 +355,11 @@ class ReferencePlan(object):
             Logger.info("Imported base VG {} as {}".format(base_vg_url,
                 imported_id))
             self.base_vg_ids.append(imported_id)
+            
+        if self.hgvm_url:
+            # Just import this whole directory
+            self.hgvm_directory = Directory.import_from(import_function,
+                self.hgvm_url)
     
     def set_chromosome_name(self, accession, name):
         """

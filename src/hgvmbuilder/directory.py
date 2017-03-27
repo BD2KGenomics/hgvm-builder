@@ -34,6 +34,13 @@ class Directory(object):
         # This holds Toil IDs by file name
         self.ids = values
         
+    def __repr__(self):
+        """
+        Report ourselves fully.
+        """
+        
+        return "Directory(" + repr(self.ids) + ")"
+        
     def add(self, file_name, file_id):
         """
         Save the file with the given ID in the directory under the given name.
@@ -104,10 +111,11 @@ class Directory(object):
             
         return self
                 
-    def export(self, toil_instance, base_url):
+    def export_to(self, export_function, base_url):
         """
         Export all the files in the Cirectory under the given base URL, using
-        the given Toil instance. Must bve run on the Toil master.
+        the given exporting function that takes an ID and a target URL. Must be
+        run on the Toil master.
         
         Can be chained.
         """
@@ -135,10 +143,56 @@ class Directory(object):
                           
             # Now that we know the directory exists if it's needed, export the
             # file.
-            toil_instance.exportFile(file_id, "{}/{}".format(base_url,
+            export_function(file_id, "{}/{}".format(base_url,
                 file_name))
                 
         return self
+        
+    @staticmethod
+    def import_from(import_function, base_url):
+        """
+        Import the files and directories under the given file URL into Toil
+        using the given URL-to-file-ID uploading function, and return a
+        Directory representing them.
+        
+        """
+        
+        Logger.info("Import directory from {}".format(base_url))
+        
+        # We need to parse the URL so we can do special handling of file URLs
+        parsing = urlparse.urlparse(base_url)
+        
+        if parsing.scheme == "file":
+            # Work out what directory to look in
+            base_path = parsing.path
+        else:
+            raise RuntimeError("Cannot recursively traverse non-file URLs")
+        
+        # Make the path absolute
+        base_path = os.path.abspath(base_path)
+        
+        # Make an empty Directory
+        directory = Directory()
+    
+        for dir_path, dir_names, file_names in os.walk(base_path):
+            # For every directory we find
+            for file_name in file_names:
+                # For every file in that directory
+                
+                # Get its full absolute path
+                full_path = os.path.join(base_path, dir_path, file_name)
+                
+                # Import it
+                file_id = import_function("file:" + full_path)
+                
+                # Register it in the directory we're building, using the path
+                # relative from the path for the base directory.
+                directory.add(os.path.relpath(os.path.join(dir_path, file_name),
+                    base_path), file_id)
+        
+        # Return the completed directory
+        return directory
+            
     
     def dump(self, file_store, base_path):
         """
@@ -175,8 +229,8 @@ class Directory(object):
             # Actually download the file to a temp directory.
             temp_name = file_store.readGlobalFile(file_id)
             
-            # Copy it to the right place, fixing symlink-ness, etc.
-            shutil.copy(temp_name, local_name)
+            # Copy it to the right place, ignoring permissions.
+            shutil.copyfile(temp_name, local_name)
             
         return self
         
