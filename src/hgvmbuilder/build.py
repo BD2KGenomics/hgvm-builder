@@ -855,7 +855,7 @@ def align_to_hgvm_job(job, options, eval_plan, hgvm, fastqs=[], sequences=None):
     hgvm.download(job.fileStore, hgvm_dir)
     
     # Prepare some args to align to the HGVM
-    vg_args = ["vg", "map", "-x", os.path.join(hgvm_dir, "hgvm.xg"),
+    vg_args = ["vg", "map", "-t", "16", "-x", os.path.join(hgvm_dir, "hgvm.xg"),
         "-g", os.path.join(hgvm_dir, "hgvm.gcsa")]
         
     for fastq_id in fastqs:
