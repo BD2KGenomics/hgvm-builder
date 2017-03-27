@@ -751,6 +751,9 @@ def split_records_job(job, options, file_ids, lines_per_record=4,
         lines_per_record * records_per_part)
     part_count = whole_parts + int(bool(partial_parts))
     
+    RealtimeLogger.info("Splitting {} into {} parts of {} lines each...".format(
+        file_ids, part_count, lines_per_record * records_per_part))
+    
     # This holds a list for each chunk of all the files' chunks, as file IDs
     part_lists = []
     
@@ -778,6 +781,7 @@ def split_records_job(job, options, file_ids, lines_per_record=4,
                 part_list.append(chunk_id)
         
         # Now we have a whole set of corresponding parts, so send it out
+        RealtimeLogger.info("Part {}: {}".format(i, part_list))
         part_lists.append(part_list)
         part_list = []
     
@@ -851,7 +855,6 @@ def align_to_hgvm_job(job, options, eval_plan, hgvm, fastqs=[], sequences=None):
     
     # Download the HGVM
     hgvm_dir = job.fileStore.getLocalTempDir()
-    RealtimeLogger.info("Download {} to {}".format(repr(hgvm), hgvm_dir))
     hgvm.download(job.fileStore, hgvm_dir)
     
     # Prepare some args to align to the HGVM
@@ -871,6 +874,9 @@ def align_to_hgvm_job(job, options, eval_plan, hgvm, fastqs=[], sequences=None):
         vg_args.append(sequences_filename)
     
     # TODO: configure multimapping and stuff
+    
+    RealtimeLogger.info("Aligning FASTQs: {} and sequences: {} to HGVM".format(
+        fastqs, sequences))
     
     with job.fileStore.writeGlobalFileStream() as (gam_handle, gam_id):
         # Align and stream GAM to the filestore
