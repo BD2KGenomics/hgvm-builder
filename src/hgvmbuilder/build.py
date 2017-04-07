@@ -332,7 +332,7 @@ def gcsa_index_job(job, options, plan, vg_id):
     # Set up args for the VG call
     # TODO: don't hardcode options
     vg_args = ["vg", "index", "-g", gcsa_name,
-        "-k", "8", "-e", "2", "-X", "2", "--size-limit", "500", vg_name]
+        "-k", "8", "-e", "2", "-X", "2", "--size-limit", "10000", vg_name]
     
     # Run the call
     options.drunner.call([vg_args])
@@ -826,12 +826,12 @@ def align_to_hgvm_chunked_job(job, options, eval_plan, hgvm, fastqs=[],
                 # Use the one-element parts lists as sequence files
                 rvs.append(job.addChildJobFn(align_to_hgvm_job, options,
                     eval_plan, hgvm, sequences=part_list[0],
-                    cores=16, memory="50G", disk="100G").rv())
+                    cores=32, memory="50G", disk="100G").rv())
             else:
                 # Use the multi-element parts lists as FASTQs
                 rvs.append(job.addChildJobFn(align_to_hgvm_job, options,
                     eval_plan, hgvm, fastqs=part_list,
-                    cores=16, memory="50G", disk="100G").rv())
+                    cores=32, memory="50G", disk="100G").rv())
         # Return all the aligned parts
         return rvs
             
@@ -858,7 +858,8 @@ def align_to_hgvm_job(job, options, eval_plan, hgvm, fastqs=[], sequences=None):
     hgvm.download(job.fileStore, hgvm_dir)
     
     # Prepare some args to align to the HGVM
-    vg_args = ["vg", "map", "-t", "16", "-x", os.path.join(hgvm_dir, "hgvm.xg"),
+    vg_args = ["vg", "map", "-t", "32", "--try-up-to", "4", "--hit-max", "512",
+        "--drop-chain", "0.5", "-x", os.path.join(hgvm_dir, "hgvm.xg"),
         "-g", os.path.join(hgvm_dir, "hgvm.gcsa")]
         
     for fastq_id in fastqs:
