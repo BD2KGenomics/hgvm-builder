@@ -1,27 +1,93 @@
 #!/usr/bin/env bash
 # 1mb_test.sh: run a 1-megabase test of the vg caller for SVs, manually
 
-set -e
+set -ex
 
+# For building the graph, what FASTA and VCF should we use?
+# VCF also contains SV truth calls
 GRCH38_FASTA="../GRCh38.fa"
 CHR22_VCF="/cluster/home/charles/SV_HGVM_research/eighth_draft_GRCh38_bks_only_polA25_chrs/ALL.chr22.wgs.integrated_sv_map_v2.20130502.svs.GRCh38.bks.only.genotypes.vcf.gz"
 
+# How close to you have to be to the SV you are looking for, in start coordinates, to count?
+THRESHOLD=100
+
+# What region should we process?
+REGION_START=17000000
+REGION_END=18000000
+
 mkdir -p 1mb
 
-# Make a graph of a 1 megabase region, which contains some SVs in NA12878
-time vg construct -r ${GRCH38_FASTA} -v ${CHR22_VCF} -f -n 22=CM000684.2 -R 22:17000000-18000000  > 1mb/1mb.vg
+if [ ! -e 1mb/1mb.vg ]; then
 
-# Index the graph
-/usr/bin/time -v vg index -x 1mb/1mb.xg -g 1mb/1mb.gcsa 1mb/1mb.vg -k 16
+    # Make a graph of a 1 megabase region, which contains some SVs in NA12878
+    time vg construct -r ${GRCH38_FASTA} -v ${CHR22_VCF} -f -n 22=CM000684.2 -R "22:${REGION_START}-${REGION_END}"  > 1mb/1mb.vg
+    
+fi
 
-# Do the mapping
-time vg map -x 1mb/1mb.xg -g 1mb/1mb.gcsa -f NA12878.part.R1.fastq -f NA12878.part.R2.fastq > 1mb/NA12878.gam
+if [ ! -e 1mb/1mb.xg ] || [ ! -e 1mb/1mb.gcsa ]; then
 
-# Do the pileup
-time vg pileup 1mb/1mb.vg 1mb/NA12878.gam > 1mb/NA12878.vgpu
+    # Index the graph
+    /usr/bin/time -v vg index -x 1mb/1mb.xg -g 1mb/1mb.gcsa 1mb/1mb.vg -k 16
+    
+fi
+
+if [ ! -e 1mb/NA12878.gam ]; then
+
+    # Do the mapping
+    time vg map -x 1mb/1mb.xg -g 1mb/1mb.gcsa -f NA12878.part.R1.fastq -f NA12878.part.R2.fastq > 1mb/NA12878.gam
+
+fi
+
+if [ ! -e 1mb/NA12878.vgpu ]; then
+
+    # Do the pileup
+    time vg pileup 1mb/1mb.vg 1mb/NA12878.gam > 1mb/NA12878.vgpu
+    
+fi
 
 # Make variant calls
-time vg call -v -p 1mb/1mb.vg 1mb/NA12878.vgpu -r CM000684.2 > 1mb/NA12878.vcf
+time vg call -v -p 1mb/1mb.vg 1mb/NA12878.vgpu -r CM000684.2 -o ${REGION_START} > 1mb/NA12878.vcf
 
 # Grab what we expect
-bcftools view -s NA12878 ${CHR22_VCF} | cut -f1-3,10 | grep -v '0/0' | grep -v '0|0' | awk  -F $'\t' 'BEGIN {OFS = FS} {if ($2 > 17000000 && $2 < 18000000) { $2 = $2 - 17000000; print $0 }}'
+bcftools view -s NA12878 ${CHR22_VCF} -r "22:${REGION_START}-${REGION_END}" | bcftools filter -e 'GT=="0/0" || GT=="0|0" || GT=="0" || FILTER!="PASS"' | grep -v "#" | cut -f1-3,10 > 1mb/want.tsv
+
+# Grab the SVs we actually have. Omit IDs since they're long and useless
+cat 1mb/NA12878.vcf | bcftools filter -e 'GT=="0/0" || GT=="0|0" || GT=="0" || FILTER!="PASS" || (SVLEN>-50 && SVLEN<50)' | grep -v "#" | sort -n -k2 | cut -f1-2,10 > 1mb/got.tsv
+
+# Now find out which wanted SVs have a found SV sufficiently close
+# See <http://stackoverflow.com/a/1521603>
+true >1mb/found.tsv
+exec 4<1mb/want.tsv
+while read -u4 LINE ; do
+    # Where is this SV?
+    POSITION=$(echo "${LINE}" | cut -f2)
+    # Find the closest value in column 2 of the found SVs
+    # See <http://stackoverflow.com/a/17853270>
+    NEAREST=$(awk -v c=2 -v t=${POSITION} 'NR==1{d=$c-t;d=d<0?-d:d;v=$c;next}{m=$c-t;m=m<0?-m:m}m<d{d=m;v=$c}END{print v}' 1mb/got.tsv)
+    
+    if [ "$((POSITION-NEAREST))" -lt "${THRESHOLD}" -a "$((NEAREST-POSITION))" -lt "${THRESHOLD}" ]; then
+        # It's in range
+        echo "${LINE} matched at ${NEAREST}" >>1mb/found.tsv
+    fi
+done
+
+# Count up score
+EXPECTED=$(cat 1mb/want.tsv | wc -l)
+FOUND=$(cat 1mb/found.tsv | wc -l)
+
+PORTION=$(echo "${FOUND} / ${EXPECTED}" | bc -l)
+
+echo "Portion of SVs recalled: ${PORTION}"
+
+
+
+
+
+
+
+
+
+
+
+
+
