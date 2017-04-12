@@ -967,6 +967,8 @@ def call_on_hgvm_job(job, options, hgvm, pileup_id, vcf=False):
     # TODO: don't just guess a ref path. Make call not require one (or allow
     # many).
     ref_path = options.vcf_contig[0]
+    if options.add_chr:
+        ref_path = "chr" + ref_path
     
     # Set up the VG run
     vg_args = ["vg", "call", "--aug-graph", augmented_filename,
