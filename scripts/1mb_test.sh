@@ -12,8 +12,8 @@ CHR22_VCF="/cluster/home/charles/SV_HGVM_research/eighth_draft_GRCh38_bks_only_p
 THRESHOLD=100
 
 # What region should we process?
-REGION_START=17000000
-REGION_END=18000000
+REGION_START=36000000
+REGION_END=37000000
 
 mkdir -p 1mb
 
@@ -31,10 +31,17 @@ if [ ! -e 1mb/1mb.xg ] || [ ! -e 1mb/1mb.gcsa ]; then
     
 fi
 
+if [ ! -e 1mb/NA12878.part.R1.fastq ] || [ ! -e 1mb/NA12878.part.R2.fastq ]; then
+    # Go get the relevant reads
+    samtools view -b ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/illumina_platinum_pedigree/data/CEU/NA12878/alignment/NA12878.alt_bwamem_GRCh38DH.20150706.CEU.illumina_platinum_ped.cram "chr22:${REGION_START}-${REGION_END}" > 1mb/NA12878.part.bam
+    samtools sort -n 1mb/NA12878.part.bam -o 1mb/NA12878.part.byname.bam
+    samtools view 1mb/NA12878.part.byname.bam | ./scripts/smartSam2Fastq.py --fq1 1mb/NA12878.part.R1.fastq --fq2 1mb/NA12878.part.R2.fastq --drop_secondary
+fi
+
 if [ ! -e 1mb/NA12878.gam ]; then
 
     # Do the mapping
-    time vg map -x 1mb/1mb.xg -g 1mb/1mb.gcsa -f NA12878.part.R1.fastq -f NA12878.part.R2.fastq > 1mb/NA12878.gam
+    time vg map -x 1mb/1mb.xg -g 1mb/1mb.gcsa -f 1mb/NA12878.part.R1.fastq -f 1mb/NA12878.part.R2.fastq > 1mb/NA12878.gam
 
 fi
 
@@ -46,13 +53,14 @@ if [ ! -e 1mb/NA12878.vgpu ]; then
 fi
 
 # Make variant calls
-time vg call -v -p 1mb/1mb.vg 1mb/NA12878.vgpu -r CM000684.2 -o ${REGION_START} > 1mb/NA12878.vcf
+time vg call -v -p 1mb/1mb.vg 1mb/NA12878.vgpu -r CM000684.2 -o ${REGION_START} --aug-graph 1mb/aug.vg > 1mb/NA12878.vcf
+vg index -x 1mb/aug.xg 1mb/aug.vg
 
 # Grab what we expect
 bcftools view -s NA12878 ${CHR22_VCF} -r "22:${REGION_START}-${REGION_END}" | bcftools filter -e 'GT=="0/0" || GT=="0|0" || GT=="0" || FILTER!="PASS"' | grep -v "#" | cut -f1-3,10 > 1mb/want.tsv
 
 # Grab the SVs we actually have. Omit IDs since they're long and useless
-cat 1mb/NA12878.vcf | bcftools filter -e 'GT=="0/0" || GT=="0|0" || GT=="0" || FILTER!="PASS" || (SVLEN>-50 && SVLEN<50)' | grep -v "#" | sort -n -k2 | cut -f1-2,10 > 1mb/got.tsv
+cat 1mb/NA12878.vcf | bcftools filter -e 'GT=="0/0" || GT=="0|0" || GT=="0" || FILTER!="PASS" || (SVLEN>-25 && SVLEN<25)' | grep -v "#" | sort -n -k2 | cut -f1-2,10 > 1mb/got.tsv
 
 # Now find out which wanted SVs have a found SV sufficiently close
 # See <http://stackoverflow.com/a/1521603>

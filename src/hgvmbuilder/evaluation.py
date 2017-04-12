@@ -214,24 +214,86 @@ class EvaluationPlan(object):
             # No control graph
             self.control_graph_id = None
             
-            
-            
-        
-        
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+class SVRecallPlan(object):
+    """
+    Represents a plan to evaluate a graph reference for structural variant
+    calling, using a truth-set-based evaluation method. The graph reference is
+    used as the basis for variant calling, and then the portion of structural
+    variants that the sample is marked as having in the truth set that are
+    called as present in the sample is calculated.
     
+    Consists of a pair of FASTQ files for the variant calling, and a sample name
+    to look up in the original input VCFs to search for called structural
+    variants.
+    
+    """
+    
+    def __init__(self):
+        """
+        Make a new empty evaluation plan
+        """
+        
+        # We have the sample we're supposed to be using
+        self.sample_name = None
+        
+        # We have one set of fields that are populated as the plan is built, and
+        # another set of fields that get populated when we import the input
+        # files into Toil.
+        
+        # These all hold the URLs that we get given when building up the plan
+        # This will hold 2 FASTQ URLs.
+        self.fastq_urls = []
+        
+        # Then these will hold the IDs
+        self.fastq_ids = []
+        
+        
+    def add_fastq(self, fastq_url):
+        """
+        Add the given FASTQ either as a single FASTQ or as a memebr of the PASTQ
+        pair.
+        """
+        
+        assert(len(self.fastq_urls) <= 2)
+        self.fastq_urls.append(fastq_url)
+        
+    def set_sample_name(self, name):
+        """
+        Set the sample name for the sample we call and evaluate SVs on.
+        """
+        
+        self.sample_name = name
+        
+    def get_fastq_ids(self):
+        """
+        Get the 0-2 FASTQ file IDs to use as a list.
+        """
+        
+        return self.fastq_ids
+        
+    def get_sample_name(self):
+        """
+        Return the sample name we are using to evaluate SV calling.
+        
+        """
+        
+        return self.sample_name
+        
+    def bake(self, import_function):
+        """
+        "Bake" the plan by importing data files into a file storage system.
+        Requires a function that can take a URL and load it into a file storage
+        system, returning an ID from which the file can be retrieved. Generally
+        you would get this from something like:
+        
+            with toil.common.Toil(options) as toil_instance:
+                plan.bake(lambda url: toil_instance.importFile(url))
+        
+        But we don't want to attach directly to Toil here, so you can pass in
+        anything you want.
+        """
+        
+        # Grab the FASTQs (which is all we have to import)
+        self.fastq_ids = [import_function(url) for url in self.fastq_urls]
+        
     

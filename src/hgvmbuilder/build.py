@@ -25,20 +25,24 @@ import itertools
 import shutil
 
 import tsv
+import intervaltree
+import vcf
 
 import toil
+import toil.version
 from toil.common import Toil
 from toil.job import Job
 from toil.realtimeLogger import RealtimeLogger
 
 from .plan import ReferencePlan
-from .evaluation import EvaluationPlan
+from .evaluation import EvaluationPlan, SVRecallPlan
 from . import grcparser
 from . import thousandgenomesparser
 from .transparentunzip import TransparentUnzip
 from .commandrunner import CommandRunner
 from .directory import Directory
 from .toilpromise import ToilPromise
+from .version import version
 
 # Get a submodule-global logger
 Logger = logging.getLogger("build")
@@ -64,49 +68,64 @@ def parse_args(args):
     # Add the Toil options so the job store is the first argument
     Job.Runner.addToilOptions(parser)
     
+    # Add a version
+    parser.add_argument("--version", action="version",
+        version="%(prog)s {}\nToil {}: {}\nPyVCF: {}".format(version,
+            toil.version.version, toil.__file__, vcf.__file__),
+        help="print version and exit")
+    
     # General options
     parser.add_argument("--chromosome", default=None,
         help="If specified, restrict to a single chromosome (like \"22\")")
     
     # Data sources
     # For construction
-    parser.add_argument("--hal_url", default=None,
+    construction_group = parser.add_argument_group("Construction")
+    construction_group.add_argument("--hal_url", default=None,
         help="start with the given HAL file and convert it to vg")
-    parser.add_argument("--base_vg_url", default=None,
+    construction_group.add_argument("--base_vg_url", default=None,
         help="start with this VG file instead of converting from HAL")
-    parser.add_argument("--assembly_url", default=None,
+    construction_group.add_argument("--assembly_url", default=None,
         help="root of input assembly structure in GRC format")
-    parser.add_argument("--vcfs_url", action="append", default=[],
+    construction_group.add_argument("--vcfs_url", action="append", default=[],
         help="directory of VCFs per chromosome (may repeat)")
-    parser.add_argument("--vcf_url", action="append", default=[],
+    construction_group.add_argument("--vcf_url", action="append", default=[],
         help="single VCF for a particular chromosome")
-    parser.add_argument("--vcf_contig", action="append", default=[],
+    construction_group.add_argument("--vcf_contig", action="append", default=[],
         help="contig/chromosome for the corresponding VCF")
+    # HAL interpretation
+    construction_group.add_argument("--hal_genome", action="append", default=[],
+        help="extract the given genome from HAL files")
+    # Contig conversion
+    construction_group.add_argument("--add_chr", action="store_true",
+        help="add chr prefix when converting from vcf to graph path names")
+        
     # We can just skip construction proper and import an HGVM pre-packaged from
     # a directory.
-    parser.add_argument("--hgvm_url", default=None,
+    construction_group.add_argument("--hgvm_url", default=None,
         help="just import the given pre-built HGVM for evaluation")
         
-    # For evaluation
-    parser.add_argument("--control_graph_url", default=None,
+    # For realignment evaluation
+    realignment_group = parser.add_argument_group("Realignment evaluation")
+    realignment_group.add_argument("--control_graph_url", default=None,
         help="use the given vg file as a control")
-    parser.add_argument("--control_graph_xg_url", default=None,
+    realignment_group.add_argument("--control_graph_xg_url", default=None,
         help="use the given xg index for the control graph")
-    parser.add_argument("--control_graph_gcsa_url", default=None,
+    realignment_group.add_argument("--control_graph_gcsa_url", default=None,
         help="use the given gcsa/lcp index for the control graph")
-    parser.add_argument("--sample_fastq_url", action="append", default=[],
-        help="FASTQ for one end of evaluation reads")
-    parser.add_argument("--eval_sequences_url", default=None,
+    realignment_group.add_argument("--sample_fastq_url", action="append",
+        default=[],
+        help="FASTQ for one end of realignment evaluation reads")
+    realignment_group.add_argument("--eval_sequences_url", default=None,
         help="sequences to align to the sample graph, one sequence per line")
         
-        
-    # HAL interpretation
-    parser.add_argument("--hal_genome", action="append", default=[],
-        help="extract the given genome from HAL files")
-        
-    # Contig conversion
-    parser.add_argument("--add_chr", action="store_true",
-        help="add chr prefix when converting from vcf to graph path names")
+    # For SV calling and comparison against truth evaluaton
+    sv_group = parser.add_argument_group("Structural variant evaluation")
+    sv_group.add_argument("--sv_sample_name", default=None,
+        help="evaluate recall of this sample's SVs")
+    sv_group.add_argument("--sv_sample_fastq_url", action="append",
+        default=[],
+        help="FASTQ for one end of SV evaluation reads")
         
     # Output
     parser.add_argument("out_dir",
@@ -198,6 +217,25 @@ def create_eval_plan(control_url, xg_url, gcsa_url, sample_fq_urls,
         eval_plan.set_eval_sequences(sequences_url)
         
     return eval_plan
+    
+def create_recall_plan(sample_fq_urls, sample_name):
+    """
+    Create an SVRecallPlan to evaluate structural variant recall for the given
+    sample.
+    """
+    
+    recall_plan = SVRecallPlan()
+    
+    for url in sample_fq_urls:
+        # Add all the FASTQs
+        recall_plan.add_fastq(url)
+        
+    if sample_name is not None:
+        # And the sample name
+        recall_plan.set_sample_name(sample_name)
+        
+    return recall_plan
+    
    
 def prepare_fasta(job, fasta_id):
     """
@@ -570,7 +608,7 @@ def add_variants_job(job, options, plan, vg_id, vcf_ids):
         vg_args.append(vcf_filename)
         
         
-    if not hasattr(options, 'add_chr') or options.add_chr:
+    if options.add_chr:
         # Make sure to convert vcf names like "22" to UCSC-style "chr22".
         for base_name in plan.for_each_chromosome():
             vg_args.append("-n")
@@ -792,7 +830,7 @@ def split_records_job(job, options, file_ids, lines_per_record=4,
     # Return the list of lists of corresponding chunks
     return part_lists
     
-def align_to_hgvm_chunked_job(job, options, eval_plan, hgvm, fastqs=[],
+def align_to_hgvm_chunked_job(job, options, hgvm, fastqs=[],
     sequences=None):
     """
     Align either a single or a pair of paired FASTQs, or a file of sequences,
@@ -824,13 +862,13 @@ def align_to_hgvm_chunked_job(job, options, eval_plan, hgvm, fastqs=[],
         for part_list in parts:
             if sequences is not None:
                 # Use the one-element parts lists as sequence files
-                rvs.append(job.addChildJobFn(align_to_hgvm_job, options,
-                    eval_plan, hgvm, sequences=part_list[0],
+                rvs.append(job.addChildJobFn(align_to_hgvm_job, options, hgvm,
+                    sequences=part_list[0],
                     cores=32, memory="50G", disk="100G").rv())
             else:
                 # Use the multi-element parts lists as FASTQs
-                rvs.append(job.addChildJobFn(align_to_hgvm_job, options,
-                    eval_plan, hgvm, fastqs=part_list,
+                rvs.append(job.addChildJobFn(align_to_hgvm_job, options, hgvm,
+                    fastqs=part_list,
                     cores=32, memory="50G", disk="100G").rv())
         # Return all the aligned parts
         return rvs
@@ -843,7 +881,7 @@ def align_to_hgvm_chunked_job(job, options, eval_plan, hgvm, fastqs=[],
     
     
     
-def align_to_hgvm_job(job, options, eval_plan, hgvm, fastqs=[], sequences=None):
+def align_to_hgvm_job(job, options, hgvm, fastqs=[], sequences=None):
     """
     Align either a single or a pair of paired FASTQs, or a file of sequences,
     one per line, to an HGVM represented as a Directory.
@@ -885,7 +923,7 @@ def align_to_hgvm_job(job, options, eval_plan, hgvm, fastqs=[], sequences=None):
     
     return gam_id
     
-def pileup_on_hgvm_job(job, options, eval_plan, hgvm, gam_id):
+def pileup_on_hgvm_job(job, options, hgvm, gam_id):
     """
     Pile up the given GAM file on the given packaged HGVM. Returns the pileup
     file ID.
@@ -909,11 +947,11 @@ def pileup_on_hgvm_job(job, options, eval_plan, hgvm, gam_id):
     
     return pileup_id
     
-def call_on_hgvm_job(job, options, eval_plan, hgvm, pileup_id):
+def call_on_hgvm_job(job, options, hgvm, pileup_id, vcf=False):
     """
     Given a packaged HGVM Directory and a pileup file ID, produce variant calls
-    in Locus format. Returns a Directory with the Locus data as "calls.loci" and
-    the augmented graph as "augmented.vg".
+    in Locus format. Returns a Directory with the Locus data as "calls.loci" or
+    the VCF data as "calls.vcf", and the augmented graph as "augmented.vg".
     
     """
     
@@ -931,14 +969,18 @@ def call_on_hgvm_job(job, options, eval_plan, hgvm, pileup_id):
     ref_path = options.vcf_contig[0]
     
     # Set up the VG run
-    vg_args = ["vg", "call", "--no-vcf", "--aug-graph", augmented_filename,
+    vg_args = ["vg", "call", "--aug-graph", augmented_filename,
         "--ref", ref_path, vg_filename, pileup_filename]
+        
+    if not vcf:
+        # Don'tmake a VCF
+        vg_args.append("--no-vcf")
     
     # TODO: configure thresholds and filters
     
-    with job.fileStore.writeGlobalFileStream() as (locus_handle, locus_id):
-        # Call and stream the Locus data to the file store
-        options.drunner.call([vg_args], outfile=locus_handle)
+    with job.fileStore.writeGlobalFileStream() as (output_handle, output_id):
+        # Call and stream the Locus or VCF data to the file store
+        options.drunner.call([vg_args], outfile=output_handle)
         
     # Upload the augmented graph
     augmented_id = job.fileStore.writeGlobalFile(augmented_filename)
@@ -946,7 +988,7 @@ def call_on_hgvm_job(job, options, eval_plan, hgvm, pileup_id):
     # Put the files in a Directory
     results = Directory()
     results.add("augmented.vg", augmented_id)
-    results.add("calls.loci", locus_id)
+    results.add("calls.vcf" if vcf else "calls.loci", output_id)
     
     return results
     
@@ -1171,7 +1213,7 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
             # Looping over the experimental and the control...
         
             align_job = job.addChildJobFn(align_to_hgvm_chunked_job, options,
-                eval_plan, hgvm, fastqs=eval_plan.get_fastq_ids(),
+                hgvm, fastqs=eval_plan.get_fastq_ids(),
                 cores=16, memory="50G", disk="100G")
             # Put it in a Directory in a promise
             align_promise = ToilPromise.wrap(align_job).then(
@@ -1179,7 +1221,7 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
             
             # Then do the pileup
             pileup_job = align_job.addFollowOnJobFn(pileup_on_hgvm_job, options,
-                eval_plan, hgvm, align_job.rv(),
+                hgvm, align_job.rv(),
                 cores=1, memory="50G", disk="100G")
             # Put it in a Directory in a promise
             pileup_promise = ToilPromise.wrap(pileup_job).then(
@@ -1187,13 +1229,13 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
             
             # Then do the calling
             call_job = pileup_job.addFollowOnJobFn(call_on_hgvm_job, options,
-                eval_plan, hgvm, pileup_job.rv(),
+                hgvm, pileup_job.rv(),
                 cores=1, memory="50G", disk="50G")
             # And a promise for the call results directory.
             call_promise = ToilPromise.wrap(call_job)
             
-            # Then subset the graph and get the new VG id and put it in a directory
-            # Then do the calling
+            # Then subset the graph and get the new VG id and put it in a
+            # directory. Then do the calling
             subset_job = call_job.addFollowOnJobFn(subset_graph_job, options,
                 eval_plan, call_job.rv(),
                 cores=1, memory="50G", disk="50G")
@@ -1214,8 +1256,7 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
                 
                 # Then realign and grab the realigned GAM
                 realign_job = package_job.addFollowOnJobFn(
-                    align_to_hgvm_chunked_job, options, eval_plan,
-                    package_job.rv(),
+                    align_to_hgvm_chunked_job, options, package_job.rv(),
                     sequences=eval_plan.get_eval_sequences_id(),
                     cores=16, memory="50G", disk="100G")
                     
@@ -1251,7 +1292,7 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
             
             # Realign and grab the realigned GAM
             realign_job = job.addChildJobFn(align_to_hgvm_chunked_job,
-                options, eval_plan, graphs_to_test["control"],
+                options, graphs_to_test["control"],
                 sequences=eval_plan.get_eval_sequences_id(),
                 cores=16, memory="50G", disk="100G")
                 
@@ -1297,12 +1338,167 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
     # Otherwise return this empty directory
     return Directory()
     
-def main_job(job, options, plan, eval_plan):
+def measure_sv_recall_job(job, options, call_dir, truth_vcfs, sample_name,
+    threshold=25, radius=25):
+    """
+    Given a directory with a "calls.vcf" in it, and a bunch of file IDs for
+    truth VCFs that may contain some structural variants, calculate the portion
+    of SVs in the truth set that have SVs called sufficiently close in the call
+    VCF.
+    
+    threshold gives the minimum length change for a called variant to be
+    structural, and radius gives how close a called SV has to be to an expected
+    SV for the expected SV to be counted as recalled. Truth variants are
+    identified as structural by the presence of an SVTYPE.
+    
+    Returns a Directory with a "recall.tsv" containing the statistics.
+    """
+    
+    RealtimeLogger.info("Compare calls against {} truth VCFs".format(
+        len(truth_vcfs)))
+    
+    # First load all the SV call positions and cover a range around the start in
+    # an interval tree per contig
+    contig_trees = collections.defaultdict(intervaltree.IntervalTree)
+    
+    with job.fileStore.readGlobalFileStream(call_dir.get("calls.vcf")) as calls:
+        # Stream the file
+        for record in vcf.Reader(calls):
+            # For each call
+            
+            # Filters get parsed into a list, or None if it's "."
+            if record.FILTER is not None and len(record.FILTER) > 0:
+                # Skip filtered variants
+                continue
+            
+            # Find out its max SVLEN length change
+            svlen = max([abs(int(x)) for x in record.INFO["SVLEN"]])
+            
+            if svlen < threshold:
+                # Too small to be an SV
+                continue
+                
+            if record.samples[0]["GT"] in {"0/0", "0|0", "0"}:
+                # Skip SVs that aren't actually called in the sample
+                continue
+            
+            # The calls that come out already have "chr" if necessary.
+            
+            # Add an interval around the SV call
+            contig_trees[record.CHROM].addi(record.POS - radius,
+                record.POS + radius, True)
+                
+    # Set up some stats to fill in
+    found_svs = 0
+    total_svs = 0
+                
+    # Then loop over the truth VCFs
+    for vcf_id in truth_vcfs:
+        with job.fileStore.readGlobalFileStream(vcf_id) as truth:
+            for record in vcf.Reader(TransparentUnzip(truth)):
+                # For every truth VCF record
+                
+                if not record.INFO.has_key("SVTYPE"):
+                    # Skip non-structural variants
+                    continue
+                    
+                if record.FILTER is not None and len(record.FILTER) > 0:
+                    # Skip filtered variants
+                    continue
+                    
+                if record.genotype(sample_name)["GT"] in {"0/0", "0|0", "0"}:
+                    # Skip SVs that aren't actually supposed to be in the sample
+                    continue
+                    
+                # This is an SV
+                total_svs += 1
+                
+                # See what contig it's on
+                chrom_name = record.CHROM
+                if options.add_chr:
+                    chrom_name = "chr" + chrom_name
+                    
+                if len(contig_trees[chrom_name][record.POS]) != 0:
+                    # We hit near enough to a called variant, so this SV is
+                    # recalled.
+                    found_svs += 1
+    
+    # Compute the portion recalled and output a TSV with it and the totals
+    portion_recalled = float(found_svs) / total_svs if total_svs > 0 else 0
+    
+    # Drop the TSV in a Directory and return it
+    with job.fileStore.writeGlobalFileStream() as (tsv_handle, tsv_id):
+        writer = tsv.TsvWriter(tsv_handle)
+        writer.line("Found", found_svs)
+        writer.line("Total", total_svs)
+        writer.line("Recall", portion_recalled)
+        
+        return Directory({"recall.tsv": tsv_id})
+    
+def hgvm_sv_recall_job(job, options, plan, recall_plan, hgvm):
+    """
+    Toil job for evaluating an HGVM's structural variant calling recall rate.
+    
+    """
+    
+    # Make sure we have everything we would need to actually do this job
+    fastqs=recall_plan.get_fastq_ids()
+    if len(fastqs) == 0 or recall_plan.get_sample_name() is None:
+        # Nothing to do!
+        return Directory()
+    
+    
+    # Align the reads
+    align_job = job.addChildJobFn(align_to_hgvm_chunked_job, options,
+        hgvm, fastqs=fastqs,
+        cores=16, memory="50G", disk="100G")
+    # Put it in a Directory in a promise
+    align_promise = ToilPromise.wrap(align_job).then(
+        lambda id: Directory({"aligned.gam": id}))
+            
+    # Then do the pileup
+    pileup_job = align_job.addFollowOnJobFn(pileup_on_hgvm_job, options,
+        hgvm, align_job.rv(),
+        cores=1, memory="50G", disk="100G")
+    # Put it in a Directory in a promise
+    pileup_promise = ToilPromise.wrap(pileup_job).then(
+        lambda id: Directory({"pileup.vgpu": id}))
+    
+    # Then do the calling
+    call_job = pileup_job.addFollowOnJobFn(call_on_hgvm_job, options,
+        hgvm, pileup_job.rv(), vcf=True,
+        cores=1, memory="50G", disk="50G")
+    # And a promise for the call results directory.
+    call_promise = ToilPromise.wrap(call_job)
+    
+    # Collect the expected variants from all the input VCFs for the chromosomes
+    # we did
+    truth_vcfs = []
+    for chromosome in plan.for_each_chromosome():
+        # TODO: limit to just the contigs we are actually doing, somehow...
+        for vcf_id in plan.get_vcf_ids(chromosome):
+            # Aggregate into a list of VCFs
+            truth_vcfs.append(vcf_id)
+    
+    # Compare the expected variants to the observed variants and compute the
+    # fraction recalled
+    compare_job = call_job.addFollowOnJobFn(measure_sv_recall_job, options,
+        call_job.rv(), truth_vcfs, recall_plan.get_sample_name(),
+        cores=1, memory="8G", disk="100G")
+    # And add a promise for its results Directory
+    compare_promise = ToilPromise.wrap(compare_job)
+    
+    # Return all that as a Directory
+    return ToilPromise.all([align_promise, pileup_promise, call_promise,
+        compare_promise]).then(
+        lambda dirs: dirs[0].merge(*dirs[1:])).unwrap_result()
+    
+def main_job(job, options, plan, eval_plan, recall_plan):
     """
     Root job of the Toil workflow. Build and then evaluate an HGVM.
     
-    Returns a pair of the packaged HGVM Directory and the evaluation results
-    Directory.
+    Returns a tuple of the packaged HGVM Directory, the realignment evaluation
+    results Directory, and the SV recall results Directory.
     
     """
     
@@ -1312,13 +1508,18 @@ def main_job(job, options, plan, eval_plan):
     build_job = job.addChildJobFn(hgvm_build_job, options, plan,
         cores=1, memory="2G", disk="1G")
     
-    # Then evaluate it
+    # Then evaluate it with the realignment evaluation
     eval_job = build_job.addFollowOnJobFn(hgvm_eval_job, options, eval_plan,
         build_job.rv(),
         cores=1, memory="2G", disk="1G")
         
+    # And with the SV recall evaluation
+    sv_eval_job = build_job.addFollowOnJobFn(hgvm_sv_recall_job, options, plan,
+        recall_plan, build_job.rv(),
+        cores=1, memory="2G", disk="1G")
+        
     # Return the pair of created Directories
-    return (build_job.rv(), eval_job.rv())
+    return (build_job.rv(), eval_job.rv(), sv_eval_job.rv())
     
 def main(args):
     """
@@ -1343,6 +1544,9 @@ def main(args):
     # TODO: use vg to index FASTAs once, somehow.
     options.drunner.call([["samtools", "--version"]])
     
+    # And bcftools for vcf-based evaluation
+    options.drunner.call([["bcftools", "--version"]])
+    
     # And hal2vg (which can't be made to succeed with no real arguments...)
     options.drunner.call([["which", "hal2vg"]])
     
@@ -1362,26 +1566,34 @@ def main(args):
                 options.vcf_url, options.vcf_contig, options.hal_url,
                 options.base_vg_url, options.hgvm_url)
                 
-            # Also build the evaluation plan on the head node
+            # Also build the realignment evaluation plan on the head node
             eval_plan = create_eval_plan(options.control_graph_url,
                 options.control_graph_xg_url, options.control_graph_gcsa_url,
                 options.sample_fastq_url, options.eval_sequences_url)
+                
+            # And the SV recall plan
+            recall_plan = create_recall_plan(options.sv_sample_fastq_url,
+                options.sv_sample_name)
         
             # Import all the files from the plans. Now the plans will hold Toil
             # IDs for data files, and actual info for metadata files.
             plan.bake(lambda url: toil_instance.importFile(url))
             eval_plan.bake(lambda url: toil_instance.importFile(url))
+            recall_plan.bake(lambda url: toil_instance.importFile(url))
         
             # Make a root job
             root_job = Job.wrapJobFn(main_job, options, plan, eval_plan,
+                recall_plan,
                 cores=1, memory="1G", disk="1G")
             
-            # Run the root job and get the packaged HGVM and its evaluation as
+            # Run the root job and get the packaged HGVM and its evaluations as
             # Directories.
-            hgvm_directory, eval_directory = toil_instance.start(root_job)
+            hgvm_directory, eval_directory, recall_directory = \
+                toil_instance.start(root_job)
         
         # Stick the evaluations in the HGVM directory for now
         hgvm_directory.mount("eval", eval_directory)
+        hgvm_directory.mount("recall", recall_directory)
             
         # Export the HGVM
         hgvm_directory.export_to(

@@ -5,5 +5,6 @@ required_versions = {
     'tsv': '==1.1',
     'biopython': '==1.68',
     'pyvcf': '==0.6.8',
-    'pysam': '==0.10.0'
+    'pysam': '==0.10.0',
+    'intervaltree': '==2.1.0'
 }
