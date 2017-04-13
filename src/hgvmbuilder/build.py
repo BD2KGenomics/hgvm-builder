@@ -1374,7 +1374,7 @@ def measure_sv_recall_job(job, options, call_dir, truth_vcfs, sample_name,
                 continue
             
             # Find out its max SVLEN length change
-            svlen = max([abs(int(x)) for x in record.INFO["SVLEN"]])
+            svlen = max([abs(int(x)) for x in record.INFO.get("SVLEN", [0])])
             
             if svlen < threshold:
                 # Too small to be an SV
@@ -1397,7 +1397,8 @@ def measure_sv_recall_job(job, options, call_dir, truth_vcfs, sample_name,
     # Then loop over the truth VCFs
     for vcf_id in truth_vcfs:
         with job.fileStore.readGlobalFileStream(vcf_id) as truth:
-            for record in vcf.Reader(TransparentUnzip(truth)):
+            reader = vcf.Reader(TransparentUnzip(truth))
+            for record in reader:
                 # For every truth VCF record
                 
                 if not record.INFO.has_key("SVTYPE"):
@@ -1520,6 +1521,11 @@ def main_job(job, options, plan, eval_plan, recall_plan):
         recall_plan, build_job.rv(),
         cores=1, memory="2G", disk="1G")
         
+    # At this point we have a problem: if the export code fails (maybe an upload
+    # timeout or something) we lose all our work. TODO: dump some kind of cookie
+    # to console that can be used to fetch everything out of the filestore
+    # (which must still be around)
+        
     # Return the pair of created Directories
     return (build_job.rv(), eval_job.rv(), sv_eval_job.rv())
     
@@ -1559,7 +1565,8 @@ def main(args):
         
         if toil_instance.options.restart:
             # We're re-running. Grab the root job return value from restart
-            graph_ids, index_ids = toil_instance.restart()
+            hgvm_directory, eval_directory, recall_directory = \
+                toil_instance.restart()
         else:
             # Run from the top
         

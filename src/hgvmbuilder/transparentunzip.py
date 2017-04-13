@@ -67,21 +67,46 @@ class TransparentUnzip(object):
         false if there is no more data.
         """
         
-        # Try reading form the stream
-        compressed = self.stream.read(16 * 2 ** 10)
-        self.compressed_bytes += len(compressed)
-        
-        Logger.debug("Read {} bytes".format(len(compressed)))
+        if (self.decompressor is not None and
+            len(self.decompressor.unused_data) > 0):
+            # We finished decompressing, but there's more data (probably another
+            # concatenated gzip block). We need to decompress it. So start
+            # again.
+            
+            # Flush anything we haven't flushed
+            self.buffer += self.decompressor.flush()
+            # Treat whatever was left over as new, probably-compressed data
+            compressed = self.decompressor.unused_data
+            # Make a new decompressor to use
+            self.decompressor = zlib.decompressobj(zlib.MAX_WBITS + 16)
+            # Leave header_read as true, because if the first block is gzip-
+            # compressed all the other ones have to be too.
+            Logger.debug("Recycled {} bytes".format(len(compressed)))
+        else:
+            # No leftover data from the last compressed bgzip block.
+            # Try reading from the stream.
+            compressed = self.stream.read(16 * 2 ** 10)
+            self.compressed_bytes += len(compressed)
+            Logger.debug("Read {} bytes".format(len(compressed)))
         
         if compressed == "":
             # We are out of data in the stream. But maybe there's more in
             # our decompressor?
-            
+            Logger.debug("Out of input data")
             if self.decompressor is not None and self.header_read:
                 # No more input data, but we did sucessfully start
                 # decompressing. Flush out the output data.
-                self.buffer += self.decompressor.flush()
+                Logger.debug("Had buffer length {}".format(
+                    len(self.buffer)))
+                decompressed = self.decompressor.flush()
+                Logger.debug("Got {} bytes from flush with {} unconsumed and"
+                    " {} trailing".format(len(decompressed),
+                    len(self.decompressor.unconsumed_tail),
+                    len(self.decompressor.unused_data)))
+                self.buffer += decompressed
                 self.decompressor = None
+                Logger.debug("Flushed to buffer length {}".format(
+                    len(self.buffer)))
                 return True
             else:
                 # Otherwise there's just no more data
@@ -91,7 +116,12 @@ class TransparentUnzip(object):
         if self.header_read is None:
             # Try decompressing the first block
             try:
-                self.buffer += self.decompressor.decompress(compressed)
+                decompressed = self.decompressor.decompress(compressed)
+                Logger.debug("Got {} bytes from {} bytes with {} unconsumed and"
+                    " {} trailing".format(len(decompressed), len(compressed),
+                    len(self.decompressor.unconsumed_tail),
+                    len(self.decompressor.unused_data)))
+                self.buffer += decompressed
                 # We sucessfully found the headers we needed
                 self.header_read = True
                 Logger.debug("Is compressed")
@@ -105,12 +135,19 @@ class TransparentUnzip(object):
                 
         else:
             # We know if we should be compressed or not
+            Logger.debug("Extend buffer from {}".format(len(self.buffer)))
             if self.header_read:
                 # We do need to decompress
-                self.buffer += self.decompressor.decompress(compressed)
+                decompressed = self.decompressor.decompress(compressed)
+                Logger.debug("Got {} bytes from {} bytes with {} unconsumed and"
+                    " {} trailing".format(len(decompressed), len(compressed),
+                    len(self.decompressor.unconsumed_tail),
+                    len(self.decompressor.unused_data)))
+                self.buffer += decompressed
             else:
                 # We don't need to decompress at all
                 self.buffer += compressed
+            Logger.debug("Extend buffer to {}".format(len(self.buffer)))
                 
         # If we didn't EOF, we added something to the buffer.
         return True
@@ -131,7 +168,12 @@ class TransparentUnzip(object):
         
         if line == "":
             # No trailing newline only happens at the end of the file
+            Logger.debug("No trailing newline, so stop iteration")
             raise StopIteration
+        elif line[-1] == "\n":
+            Logger.debug("Found entire line of length {}".format(len(line)))
+        else:
+            Logger.debug("Found partial line of length {}".format(len(line)))
             
         # If we have any data, return it
         return line
@@ -149,7 +191,8 @@ class TransparentUnzip(object):
         # Remember the last character we could have checked
         checked = len(self.buffer)
         
-        Logger.debug("{}, {}".format(newline_index, checked))
+        Logger.debug("Start with newline at {}, checked through {}".format(
+            newline_index, checked))
         
         while (newline_index == -1 and 
             (max_bytes is None or len(self.buffer) < max_bytes) and
@@ -160,7 +203,8 @@ class TransparentUnzip(object):
             newline_index = self.buffer.find("\n", checked)
             checked = len(self.buffer)
             
-            Logger.debug("{}, {}".format(newline_index, checked))
+            Logger.debug("Newline at {}, checked through {}".format(
+                newline_index, checked))
             
         if newline_index == -1:
             # Never found a newline
