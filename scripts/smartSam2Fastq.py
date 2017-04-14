@@ -60,6 +60,8 @@ def parse_args(args):
         help="write interleaved FASTQ to fq1")
     parser.add_argument("--drop_secondary", action="store_true",
         help="drop pairs where a primary alignment is not seen at both ends")
+    parser.add_argument("--expect_paired", action="store_true",
+        help="expect all reads to have a pair partner and abort otherwise")
     
     # The command line arguments start with the program name, which we don't
     # want to treat as an argument for argparse. So we remove it.
@@ -196,6 +198,13 @@ class Read(object):
         return "{} end {} on {}: {}{}".format(self.template, self.end,
             self.contig, self.sequence, mark)
             
+    def __repr__(self):
+        """
+        Turn this Read into a string for debugging.
+        
+        """
+        return "Read(\"{}\")".format(self.line)
+            
 def parse_MD_tag(md_string, offset, length):
     """
     Given the string value of an MD tag, the offset into the read at which it
@@ -330,7 +339,7 @@ def parse_and_deduplicate_sam(sam_input, drop_secondary = False):
     deduplicates them, discarding suspect ones when non-suspect ones are
     available.
     
-    Yields dicts form end number to Read object for each template.
+    Yields dicts from end number to Read object for each template.
     
     If drop_secondary is true, discard any templates where there isn't a primary
     alignment observed for both ends.
@@ -456,9 +465,18 @@ def run(options):
     for reads_by_end in parse_and_deduplicate_sam(options.input_sam,
         options.drop_secondary):
         
-        if not (reads_by_end.has_key(1) and reads_by_end.has_key(2)):
-            # Skip unpaired reads
+        if not reads_by_end.has_key(1) and  not reads_by_end.has_key(2):
+            # Nothing to this record. Skip it.
             continue
+        
+        if not (reads_by_end.has_key(1) and reads_by_end.has_key(2)):
+            # This is an unpaired read
+            if options.expect_paired:
+                # We need to have paired reads. Something has gone wrong.
+                raise RuntimeError("Missing end for {}".format(reads_by_end))
+            else:
+                # Skip unpaired reads
+                continue
             
         # Split up the reads to their files
         write_fastq(options.fq1, reads_by_end[1])
