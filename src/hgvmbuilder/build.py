@@ -1193,8 +1193,8 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
         # parse_realignment_stats_job, by condition name.
         stats_promises = {}
         
-        # This holds a ToilPromise for either the control graph's length in bp, or
-        # None if no control graph is specified.
+        # This holds a ToilPromise for either the control graph's length in bp,
+        # or None if no control graph is specified.
         control_length_promise = None
         
         if eval_plan.get_control_graph_id() is not None:
@@ -1551,9 +1551,6 @@ def main(args):
     # And samtools
     # TODO: use vg to index FASTAs once, somehow.
     options.drunner.call([["samtools", "--version"]])
-    
-    # And bcftools for vcf-based evaluation
-    options.drunner.call([["bcftools", "--version"]])
     
     # And hal2vg (which can't be made to succeed with no real arguments...)
     options.drunner.call([["which", "hal2vg"]])
