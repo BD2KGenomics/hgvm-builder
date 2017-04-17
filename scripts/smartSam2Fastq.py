@@ -27,6 +27,7 @@ BAM_FREVERSE = 16
 BAM_FREAD1 = 64
 BAM_FREAD2 = 128
 BAM_SECONDARY = 256
+BAM_SUPPLEMENTARY = 2048
 
 def parse_args(args):
     """
@@ -128,6 +129,9 @@ class Read(object):
             
         # Mark secondary alignments
         self.is_secondary = self.flags & BAM_SECONDARY
+        
+        # And supplementary alignments
+        self.is_supplementary = self.flags & BAM_SUPPLEMENTARY
             
         # Grab the contig we mapped to
         self.contig = parts[2]
@@ -353,9 +357,9 @@ def parse_and_deduplicate_sam(sam_input, drop_secondary = False):
     reads_by_end = {}
     
     # We also keep track of which ends have had primary alignments show up. It's
-    # OK if a secondary alignment is the best one (because we drop the alignment
-    # bit and only spit out sequence and quality), but we may need a primary to
-    # exist in the region.
+    # OK if a secondary or supplementary alignment is the best one (because we
+    # drop the alignment bit and only spit out sequence and quality), but we may
+    # need a primary to exist in the region.
     primaries_seen = set()
     
     for line in sam_input:
@@ -393,8 +397,8 @@ def parse_and_deduplicate_sam(sam_input, drop_secondary = False):
             primaries_seen = set()
             
         
-        if not read.is_secondary:
-            # This is a primary read for this end, Remember that.
+        if not read.is_secondary and not read.is_supplementary:
+            # This is a primary read for this end. Remember that.
             primaries_seen.add(read.end)
             
         if not reads_by_end.has_key(read.end):
