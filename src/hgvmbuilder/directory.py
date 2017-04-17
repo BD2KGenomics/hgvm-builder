@@ -1,4 +1,4 @@
-#hgvm-builder directory.py: Represent a bunch of Toil files with filenames fro dumping
+#hgvm-builder directory.py: Represent a bunch of Toil files with filenames
 
 import os
 import os.path

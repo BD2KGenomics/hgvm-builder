@@ -6,5 +6,8 @@ required_versions = {
     'biopython': '==1.68',
     'pyvcf': '==0.6.8',
     'pysam': '==0.10.0',
-    'intervaltree': '==2.1.0'
+    'intervaltree': '==2.1.0',
+    'toil-vg': '==1.1.0a1'
 }
+
+dependency_links = ['http://github.com/adamnovak/toil-vg/tarball/master#egg=toil_vg-1.1.0a1']

@@ -43,6 +43,7 @@ from .commandrunner import CommandRunner
 from .directory import Directory
 from .toilpromise import ToilPromise
 from .version import version
+from . import toilvgfacade
 
 # Get a submodule-global logger
 Logger = logging.getLogger("build")
@@ -64,6 +65,9 @@ def parse_args(args):
     # See http://docs.python.org/library/argparse.html#formatter-class
     parser = argparse.ArgumentParser(description=__doc__, 
         formatter_class=argparse.RawDescriptionHelpFormatter)
+    
+    # Add all the toil-vg options
+    toilvgfacade.add_options(parser)
     
     # Add the Toil options so the job store is the first argument
     Job.Runner.addToilOptions(parser)

@@ -1,8 +1,11 @@
 # setup.py: based off setup.py for toil-vg, modified to install this pipeline
 # instead.
 import sys
+import os
 
-from version import version, required_versions
+# Get the local version.py and not any other version module
+execfile(os.path.join(os.path.dirname(os.path.realpath(__file__)), "version.py"))
+
 from setuptools import find_packages, setup
 from setuptools.command.test import test as TestCommand
 
@@ -14,6 +17,7 @@ kwargs = dict(
     author_email='anovak@soe.ucsc.edu',
     url="https://github.com/BD2KGenomics/hgvm-builder",
     install_requires=[package + ver for package, ver in required_versions.iteritems()],
+    dependency_links = dependency_links,
     tests_require=['pytest==2.8.3'],
     package_dir={'': 'src'},
     packages=find_packages('src'),
