@@ -4,6 +4,7 @@ set -e
 
 rm -Rf test_tree test_build
 build-hgvm ./test_tree test_build \
+    --container None \
     --base_vg_url file:`pwd`/test/tiny-flat.vg \
     --vcf_contig "x" \
     --vcf_url file:`pwd`/test/tiny.vcf \

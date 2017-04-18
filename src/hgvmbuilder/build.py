@@ -325,7 +325,7 @@ def hal2vg_job(job, options, plan, hal_id):
     
     # Pull out only the requested genomes, and sort so IDs start at 1 and are
     # nice.
-    options.drunner.call([["hal2vg", hal_file,
+    options.drunner.call(job, [["hal2vg", hal_file,
         "--inMemory",
         "--onlySequenceNames",
         "--targetGenomes", ",".join(options.hal_genome),
@@ -335,7 +335,7 @@ def hal2vg_job(job, options, plan, hal_id):
         ["vg", "ids", "-s", "-"]], outfile=open(vg_filename, "w"))
         
     # Validate the resulting graph
-    options.drunner.call([["vg", "validate", vg_filename]])
+    options.drunner.call(job, [["vg", "validate", vg_filename]])
     
     # Upload it
     vg_id = job.fileStore.writeGlobalFile(vg_filename)
@@ -343,26 +343,6 @@ def hal2vg_job(job, options, plan, hal_id):
     RealtimeLogger.info("Created VG graph {}".format(vg_id))
     return vg_id
         
-def xg_index_job(job, options, plan, vg_id):
-    """
-    Index the given VG graph into an XG file. Returns the ID of the XG file.
-    """
-    
-    # Download the VG file
-    vg_name = job.fileStore.readGlobalFile(vg_id)
-    
-    # Make an XG name
-    xg_name = os.path.join(job.fileStore.getLocalTempDir(), "index.xg")
-    
-    # Set up args for the VG call
-    vg_args = ["vg", "index", "-x", xg_name, vg_name]
-    
-    # Run the call
-    options.drunner.call([vg_args])
-    
-    # Upload the file
-    return job.fileStore.writeGlobalFile(xg_name)
-    
 def gcsa_index_job(job, options, plan, vg_id):
     """
     Index the given VG graph into a GCSA2/LCP file pair. Returns the IDs of the
@@ -383,7 +363,7 @@ def gcsa_index_job(job, options, plan, vg_id):
         "-k", "8", "-e", "2", "-X", "2", "--size-limit", "10000", vg_name]
     
     # Run the call
-    options.drunner.call([vg_args])
+    options.drunner.call(job, [vg_args])
     
     # Upload the files
     return (job.fileStore.writeGlobalFile(gcsa_name),
@@ -423,13 +403,13 @@ def merge_vgs_job(job, options, plan, vg_ids):
         vg_args = ["vg", "ids", "-j"] + vg_names
         
         # It modifies the files in place
-        options.drunner.call([vg_args])
+        options.drunner.call(job, [vg_args])
         
         cat_args = ["cat"] + vg_names
         
         with job.fileStore.writeGlobalFileStream() as (vg_handle, vg_id):
             # Make a merged vg with cat
-            options.drunner.call([cat_args], outfile=vg_handle)
+            options.drunner.call(job, [cat_args], outfile=vg_handle)
             
         return vg_id
         
@@ -456,7 +436,8 @@ def explode_vg_job(job, options, plan, vg_id):
     vg_args = ["vg", "explode", vg_name, part_dir]
     
     # Run the call and capture the output
-    report = options.drunner.call([vg_args], outfile=open(report_filename, "w"))
+    report = options.drunner.call(job, [vg_args],
+        outfile=open(report_filename, "w"))
     
     RealtimeLogger.info("Exploded and put report in {}".format(report_filename))
     
@@ -471,7 +452,7 @@ def explode_vg_job(job, options, plan, vg_id):
         parts = line.strip().split("\t")
         
         # Validate the part
-        options.drunner.call([["vg", "validate", parts[0]]])
+        options.drunner.call(job, [["vg", "validate", parts[0]]])
         
         # Save the file (first entry) to the filestore
         part_id = job.fileStore.writeGlobalFile(parts[0])
@@ -608,7 +589,7 @@ def add_variants_job(job, options, plan, vg_id, vcf_ids):
     vg_filename = job.fileStore.readGlobalFile(vg_id)
     
     # Validate it
-    options.drunner.call([["vg", "validate", vg_filename]])
+    options.drunner.call(job, [["vg", "validate", vg_filename]])
     
     # Set up a command to add the VCFs to the graph
     vg_args = ["vg", "add", vg_filename]
@@ -629,7 +610,7 @@ def add_variants_job(job, options, plan, vg_id, vcf_ids):
     
     with job.fileStore.writeGlobalFileStream() as (vg_handle, new_vg_id):
         # Stream new graph to the filestore
-        options.drunner.call([vg_args], outfile=vg_handle)
+        options.drunner.call(job, [vg_args], outfile=vg_handle)
     
     return new_vg_id
     
@@ -663,7 +644,7 @@ def graph_to_hgvm_job(job, options, vg_id):
     # TODO: drop this plan argument on lower-level functions
     
     # Make the indexes
-    xg_job = job.addChildJobFn(xg_index_job, options, None, vg_id,
+    xg_job = job.addChildJobFn(toilvgfacade.xg_index_job, options, [vg_id],
         cores=1, memory="100G", disk="20G")
     gcsa_job = job.addChildJobFn(gcsa_index_job, options, None, vg_id,
         cores=16, memory="100G", disk="500G")
@@ -717,8 +698,8 @@ def hgvm_build_job(job, options, plan):
         cores=1, memory="100G", disk="100G")
     
     # Add a followon to XG-index it
-    xg_job = merge_job.addFollowOnJobFn(xg_index_job, options, plan,
-        merge_job.rv(),
+    xg_job = merge_job.addFollowOnJobFn(toilvgfacade.xg_index_job, options,
+        [merge_job.rv()],
         cores=1, memory="100G", disk="20G")
     
     # And another to GCSA-index it
@@ -787,7 +768,7 @@ def split_records_job(job, options, file_ids, lines_per_record=4,
     file_names = [job.fileStore.readGlobalFile(x) for x in file_ids]
     
     # Measure the first file
-    line_count = int(options.drunner.call([["wc", "-l", file_names[0]],
+    line_count = int(options.drunner.call(job, [["wc", "-l", file_names[0]],
         ["cut", "-f", "1", "-d", " "]],
         check_output = True))
     
@@ -929,7 +910,7 @@ def align_to_hgvm_job(job, options, hgvm, fastqs=[], sequences=None):
     
     with job.fileStore.writeGlobalFileStream() as (gam_handle, gam_id):
         # Align and stream GAM to the filestore
-        options.drunner.call([vg_args], outfile=gam_handle)
+        options.drunner.call(job, [vg_args], outfile=gam_handle)
     
     return gam_id
     
@@ -953,7 +934,7 @@ def pileup_on_hgvm_job(job, options, hgvm, gam_id):
     
     with job.fileStore.writeGlobalFileStream() as (pileup_handle, pileup_id):
         # Pile up and stream the pileup to the file store
-        options.drunner.call([vg_args], outfile=pileup_handle)
+        options.drunner.call(job, [vg_args], outfile=pileup_handle)
     
     return pileup_id
     
@@ -992,7 +973,7 @@ def call_on_hgvm_job(job, options, hgvm, pileup_id, vcf=False):
     
     with job.fileStore.writeGlobalFileStream() as (output_handle, output_id):
         # Call and stream the Locus or VCF data to the file store
-        options.drunner.call([vg_args], outfile=output_handle)
+        options.drunner.call(job, [vg_args], outfile=output_handle)
         
     # Upload the augmented graph
     augmented_id = job.fileStore.writeGlobalFile(augmented_filename)
@@ -1021,7 +1002,7 @@ def subset_graph_job(job, options, eval_plan, call_directory):
         
     with job.fileStore.writeGlobalFileStream() as (sample_handle, sample_id):
         # Stream the sample graph to the file store
-        options.drunner.call([vg_args], outfile=sample_handle)
+        options.drunner.call(job, [vg_args], outfile=sample_handle)
         
     return sample_id
     
@@ -1042,7 +1023,7 @@ def realignment_stats_job(job, options, eval_plan, vg_id, gam_id):
         
     with job.fileStore.writeGlobalFileStream() as (stats_handle, stats_id):
         # Stream the stats to the file store
-        options.drunner.call([vg_args], outfile=stats_handle)
+        options.drunner.call(job, [vg_args], outfile=stats_handle)
         
     return stats_id
     
@@ -1105,7 +1086,7 @@ def measure_graph_job(job, options, vg_id):
     vg_args = ["vg", "stats", "--size", "--length", vg_filename]
     
     # Call and stream the Locus data to the file store
-    stats = options.drunner.call([vg_args], check_output = True)
+    stats = options.drunner.call(job, [vg_args], check_output = True)
     
     # Fill in these stat variables
     bp_length = None
@@ -1527,6 +1508,16 @@ def main_job(job, options, plan, eval_plan, recall_plan):
     
     RealtimeLogger.info("Main job starting")
     
+    # Make sure VG is available
+    options.drunner.call(job, [["vg", "version"]])
+    
+    # And samtools
+    # TODO: use vg to index FASTAs once, somehow.
+    options.drunner.call(job, [["samtools", "--version"]])
+    
+    # And hal2vg (which can't be made to succeed with no real arguments...)
+    options.drunner.call(job, [["which", "hal2vg"]])
+    
     # Build the HGVM
     build_job = job.addChildJobFn(hgvm_build_job, options, plan,
         cores=1, memory="2G", disk="1G")
@@ -1558,24 +1549,14 @@ def main(args):
     
     options = parse_args(args) # This holds the nicely-parsed options object
     
-    # Cram a CommandRunner into the options, so our internal API looks like
-    # toil-vg's.
-    options.drunner = CommandRunner()
-    
     # Set up logging
     logging.basicConfig(level=logging.INFO)
     
-    # Make sure VG is available
-    options.drunner.call([["vg", "version"]])
-    
-    # And samtools
-    # TODO: use vg to index FASTAs once, somehow.
-    options.drunner.call([["samtools", "--version"]])
-    
-    # And hal2vg (which can't be made to succeed with no real arguments...)
-    options.drunner.call([["which", "hal2vg"]])
-    
     logging.info("Running on Toil from {}".format(toil.__file__))
+    
+    # Add the drunner to the options and initialize stuff from the Toil VG
+    # config
+    toilvgfacade.initialize(options)
     
     # Start up Toil
     with Toil(options) as toil_instance:
