@@ -175,12 +175,50 @@ def xg_index_job(job, options, vg_ids):
         vg_ids, cores=options.xg_index_cores, memory=options.xg_index_mem,
         disk=options.xg_index_disk).rv()
         
+def gcsa_index_job(job, options, vg_ids):
+    """
+    Index the given graphs into a GCSA/LCP index, and return a pair of file IDs
+    for the GCSA and the LCP files.
+    
+    Will prune the graph before indexing unless options.prune_opts is explicitly
+    set as an empty list.
+    
+    """
+    
+    # Do any options manipulation we need to do
+    
+    # Strip out stuff we don't want and apply config defaults
+    options = sanitize_options(options)
+    
+    # Add the outstore, which we have sort of disabled. It insists on writing
+    # stuff, so just drop it in the current directory. It doesn't read it back.
+    options.out_store = "file:."
+
+    # Don't use it instead of the filestore
+    options.force_outstore = False
+    
+    # Pretend we're the pipeline tool
+    options.tool = "pipeline"
+    
+    # Add stuff that toil vg index uses
+    
+    # options.graphs has to have a name for every graph, to save it under in the
+    # local temp dir.
+    options.graphs = ["graph{}".format(i) for i in xrange(len(vg_ids))]
+    
+    return job.addChildJobFn(run_gcsa_prep_wrapper, options, vg_ids,
+        cores=options.misc_cores, memory=options.misc_mem,
+        disk=options.misc_disk).rv()
+        
 # Toil explodes when we try to pass it functions from other modules, so just
 # wrap all of them for now. See
 # <https://github.com/BD2KGenomics/toil/issues/1633>
         
 def run_xg_indexing_wrapper(*args, **kwargs):
     return toil_vg.vg_index.run_xg_indexing(*args, **kwargs)
+    
+def run_gcsa_prep_wrapper(*args, **kwargs):
+    return toil_vg.vg_index.run_gcsa_prep(*args, **kwargs)
     
 
 

@@ -343,32 +343,6 @@ def hal2vg_job(job, options, plan, hal_id):
     RealtimeLogger.info("Created VG graph {}".format(vg_id))
     return vg_id
         
-def gcsa_index_job(job, options, plan, vg_id):
-    """
-    Index the given VG graph into a GCSA2/LCP file pair. Returns the IDs of the
-    .gcsa and .lcp files in a pair.
-    """
-    
-    # Download the VG file
-    vg_name = job.fileStore.readGlobalFile(vg_id)
-    
-    # Make a GCSA name
-    gcsa_name = os.path.join(job.fileStore.getLocalTempDir(), "index.gcsa")
-    # Find the LCP name
-    lcp_name = gcsa_name + ".lcp"
-    
-    # Set up args for the VG call
-    # TODO: don't hardcode options
-    vg_args = ["vg", "index", "-g", gcsa_name,
-        "-k", "8", "-e", "2", "-X", "2", "--size-limit", "10000", vg_name]
-    
-    # Run the call
-    options.drunner.call(job, [vg_args])
-    
-    # Upload the files
-    return (job.fileStore.writeGlobalFile(gcsa_name),
-        job.fileStore.writeGlobalFile(lcp_name))
-    
 def merge_vgs_job(job, options, plan, vg_ids):
     """
     Merge the given VG graphs into one VG graph. Returns the ID of the merged VG
@@ -644,10 +618,8 @@ def graph_to_hgvm_job(job, options, vg_id):
     # TODO: drop this plan argument on lower-level functions
     
     # Make the indexes
-    xg_job = job.addChildJobFn(toilvgfacade.xg_index_job, options, [vg_id],
-        cores=1, memory="100G", disk="20G")
-    gcsa_job = job.addChildJobFn(gcsa_index_job, options, None, vg_id,
-        cores=16, memory="100G", disk="500G")
+    xg_job = job.addChildJobFn(toilvgfacade.xg_index_job, options, [vg_id])
+    gcsa_job = job.addChildJobFn(toilvgfacade.gcsa_index_job, options, [vg_id])
     
     # Make a packaging job
     hgvm_job = xg_job.addFollowOnJobFn(hgvm_package_job, options, None, vg_id,
@@ -699,13 +671,11 @@ def hgvm_build_job(job, options, plan):
     
     # Add a followon to XG-index it
     xg_job = merge_job.addFollowOnJobFn(toilvgfacade.xg_index_job, options,
-        [merge_job.rv()],
-        cores=1, memory="100G", disk="20G")
+        [merge_job.rv()])
     
     # And another to GCSA-index it
-    gcsa_job = merge_job.addFollowOnJobFn(gcsa_index_job, options, plan,
-        merge_job.rv(),
-        cores=16, memory="100G", disk="500G")
+    gcsa_job = merge_job.addFollowOnJobFn(toilvgfacade.gcsa_index_job, options,
+        [merge_job.rv()])
     
     # And a job to package it all up, depending on the XG and GCSA.
     directory_job = xg_job.addFollowOnJobFn(hgvm_package_job, options, plan,
