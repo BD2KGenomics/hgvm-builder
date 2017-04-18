@@ -226,6 +226,8 @@ class SVRecallPlan(object):
     to look up in the original input VCFs to search for called structural
     variants.
     
+    Instead of the FASTQs, you can also directly specify an aligned GAM.
+    
     """
     
     def __init__(self):
@@ -240,13 +242,18 @@ class SVRecallPlan(object):
         # another set of fields that get populated when we import the input
         # files into Toil.
         
-        # These all hold the URLs that we get given when building up the plan
+        # These all hold the URLs that we get given when building up the plan.
         # This will hold 2 FASTQ URLs.
         self.fastq_urls = []
+        # This will hold a GAM URL to use instead of the FASTQs
+        self.gam_url = None
         
-        # Then these will hold the IDs
+        # Then these will hold the IDs.
+        # For the FASTQs
         self.fastq_ids = []
-        
+        # And the GAM
+        self.gam_id = None
+                    
         
     def add_fastq(self, fastq_url):
         """
@@ -256,6 +263,13 @@ class SVRecallPlan(object):
         
         assert(len(self.fastq_urls) <= 2)
         self.fastq_urls.append(fastq_url)
+        
+    def set_gam_url(self, gam_url):
+        """
+        Add the given GAM file to use instead of the FASTQs
+        """
+        
+        self.gam_url = gam_url
         
     def set_sample_name(self, name):
         """
@@ -270,6 +284,13 @@ class SVRecallPlan(object):
         """
         
         return self.fastq_ids
+        
+    def get_gam_id(self):
+        """
+        Get the GAM file ID to use, or None.
+        """
+        
+        return self.gam_id
         
     def get_sample_name(self):
         """
@@ -293,7 +314,11 @@ class SVRecallPlan(object):
         anything you want.
         """
         
-        # Grab the FASTQs (which is all we have to import)
+        # Grab the FASTQs
         self.fastq_ids = [import_function(url) for url in self.fastq_urls]
+        
+        if self.gam_url is not None:
+            # Grab the GAM
+            self.gam_id = import_function(self.gam_url)
         
     

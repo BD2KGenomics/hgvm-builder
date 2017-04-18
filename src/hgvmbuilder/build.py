@@ -130,6 +130,8 @@ def parse_args(args):
     sv_group.add_argument("--sv_sample_fastq_url", action="append",
         default=[],
         help="FASTQ for one end of SV evaluation reads")
+    sv_group.add_argument("--sv_sample_gam_url", default=None,
+        help="GAM for pre-aligned evaluation reads instead of FASTQs")
         
     # Output
     parser.add_argument("out_dir",
@@ -222,10 +224,10 @@ def create_eval_plan(control_url, xg_url, gcsa_url, sample_fq_urls,
         
     return eval_plan
     
-def create_recall_plan(sample_fq_urls, sample_name):
+def create_recall_plan(sample_fq_urls, gam_url, sample_name):
     """
     Create an SVRecallPlan to evaluate structural variant recall for the given
-    sample.
+    sample, using the given FASTQs or pre-aligned GAM.
     """
     
     recall_plan = SVRecallPlan()
@@ -233,6 +235,10 @@ def create_recall_plan(sample_fq_urls, sample_name):
     for url in sample_fq_urls:
         # Add all the FASTQs
         recall_plan.add_fastq(url)
+        
+    if gam_url is not None:
+        # Add the GAM
+        recall_plan.set_gam_url(gam_url)
         
     if sample_name is not None:
         # And the sample name
@@ -1449,24 +1455,34 @@ def hgvm_sv_recall_job(job, options, plan, recall_plan, hgvm):
     """
     
     # Make sure we have everything we would need to actually do this job
-    fastqs=recall_plan.get_fastq_ids()
-    if len(fastqs) == 0 or recall_plan.get_sample_name() is None:
-        # Nothing to do!
-        return Directory()
     
-    
-    # Align the reads
-    align_job = job.addChildJobFn(align_to_hgvm_chunked_job, options,
-        hgvm, fastqs=fastqs,
-        cores=16, memory="50G", disk="100G")
-    # Put it in a Directory in a promise
-    align_promise = ToilPromise.wrap(align_job).then(
-        lambda id: Directory({"aligned.gam": id}))
+    if recall_plan.get_gam_id() is not None:
+        # We can just use this GAM
+        align_promise = ToilPromise.resolve(job, Directory(
+            {"aligned.gam": recall_plan.get_gam_id()}))
+        # Do the pileup as a child
+        pileup_job = job.addChildJobFn(pileup_on_hgvm_job, options,
+            hgvm, recall_plan.get_gam_id(),
+            cores=1, memory="50G", disk="100G")
+    else:
+        # We have to actually align some FASTQs    
+        fastqs=recall_plan.get_fastq_ids()
+        if len(fastqs) == 0 or recall_plan.get_sample_name() is None:
+            # Nothing to do!
+            return Directory()
+        
+        # Align the reads
+        align_job = job.addChildJobFn(align_to_hgvm_chunked_job, options,
+            hgvm, fastqs=fastqs,
+            cores=16, memory="50G", disk="100G")
+        # Put it in a Directory in a promise
+        align_promise = ToilPromise.wrap(align_job).then(
+            lambda id: Directory({"aligned.gam": id}))
             
-    # Then do the pileup
-    pileup_job = align_job.addFollowOnJobFn(pileup_on_hgvm_job, options,
-        hgvm, align_job.rv(),
-        cores=1, memory="50G", disk="100G")
+        # Then do the pileup as a follow-on
+        pileup_job = align_job.addFollowOnJobFn(pileup_on_hgvm_job, options,
+            hgvm, align_job.rv(),
+            cores=1, memory="50G", disk="100G")
     # Put it in a Directory in a promise
     pileup_promise = ToilPromise.wrap(pileup_job).then(
         lambda id: Directory({"pileup.vgpu": id}))
@@ -1583,7 +1599,7 @@ def main(args):
                 
             # And the SV recall plan
             recall_plan = create_recall_plan(options.sv_sample_fastq_url,
-                options.sv_sample_name)
+                options.sv_sample_gam_url, options.sv_sample_name)
         
             # Import all the files from the plans. Now the plans will hold Toil
             # IDs for data files, and actual info for metadata files.
