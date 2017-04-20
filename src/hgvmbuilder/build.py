@@ -24,6 +24,7 @@ import collections
 import itertools
 import shutil
 import datetime
+import uuid
 
 import tsv
 import intervaltree
@@ -685,10 +686,12 @@ def graphs_to_hgvm_job(job, options, vg_ids, primary_paths=None):
     
     # Write the manifest, which will include the primary paths.
     # We can add more facts here if we want.
+    # TODO: hashes or something?
     manifest = Manifest({
         "hgvm_manifest_version": "0.1",
         "build_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "primary_paths": primary_paths
+        "primary_paths": primary_paths,
+        "uuid": str(uuid.uuid4())
     })
     
     # Shift all the graphs so their ID ranges don't conflict
