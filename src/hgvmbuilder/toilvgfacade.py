@@ -171,11 +171,11 @@ def xg_index_job(job, options, vg_ids):
     # dir.
     options.index_name = "xgindex"
     
-    return job.addChildJobFn(run_xg_indexing_wrapper, options,
+    return job.addChildJobFn(toil_vg.vg_index.run_xg_indexing, options,
         vg_ids, cores=options.xg_index_cores, memory=options.xg_index_mem,
         disk=options.xg_index_disk).rv()
         
-def gcsa_index_job(job, options, vg_ids):
+def gcsa_index_job(job, options, vg_ids, primary_path_names=None):
     """
     Index the given graphs into a GCSA/LCP index, and return a pair of file IDs
     for the GCSA and the LCP files.
@@ -206,21 +206,25 @@ def gcsa_index_job(job, options, vg_ids):
     # local temp dir.
     options.graphs = ["graph{}".format(i) for i in xrange(len(vg_ids))]
     
-    return job.addChildJobFn(run_gcsa_prep_wrapper, options, vg_ids,
+    # We also need a "chroms" giving the primary path for each graph. It's OK if
+    # the path doesn't exist in a given graph, but if it does it will be added
+    # to the index.
+    if primary_path_names is not None:
+        # We have primary path names to use
+        assert(len(primary_path_names) == len(vg_ids))
+        options.chroms = primary_path_names
+    else:
+        # Fake path names
+        options.chroms = ["" for x in vg_ids]
+    
+    # options.index_name has to have the basename for the .gcsa in the local
+    # temp dir.
+    options.index_name = "gcsaindex"
+    
+    return job.addChildJobFn(toil_vg.vg_index.run_gcsa_prep, options, vg_ids,
         cores=options.misc_cores, memory=options.misc_mem,
         disk=options.misc_disk).rv()
         
-# Toil explodes when we try to pass it functions from other modules, so just
-# wrap all of them for now. See
-# <https://github.com/BD2KGenomics/toil/issues/1633>
-        
-def run_xg_indexing_wrapper(*args, **kwargs):
-    return toil_vg.vg_index.run_xg_indexing(*args, **kwargs)
-    
-def run_gcsa_prep_wrapper(*args, **kwargs):
-    return toil_vg.vg_index.run_gcsa_prep(*args, **kwargs)
-    
-
 
 
 

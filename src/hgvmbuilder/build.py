@@ -343,7 +343,7 @@ def hal2vg_job(job, options, plan, hal_id):
     RealtimeLogger.info("Created VG graph {}".format(vg_id))
     return vg_id
         
-def merge_vgs_job(job, options, plan, vg_ids):
+def merge_vgs_job(job, options, vg_ids):
     """
     Merge the given VG graphs into one VG graph. Returns the ID of the merged VG
     graph.
@@ -508,7 +508,7 @@ def hals_and_vgs_to_vg_job(job, options, plan, hal_ids, vg_ids):
     RealtimeLogger.info("Converting {} HALs".format(len(hal_children)))
 
     # Then make another child to merge all the graphs
-    merge_child = job.addChildJobFn(merge_vgs_job, options, plan,
+    merge_child = job.addChildJobFn(merge_vgs_job, options,
         converted_vgs + vg_ids, cores=1, memory="100G", disk="20G")
     for child in hal_children:
         # Make sure the merger comes after all the HAL imports
@@ -588,7 +588,7 @@ def add_variants_job(job, options, plan, vg_id, vcf_ids):
     
     return new_vg_id
     
-def hgvm_package_job(job, options, plan, vg_id, xg_id, gcsa_pair):
+def hgvm_package_job(job, options, vg_id, xg_id, gcsa_pair):
     """
     Given a VG file ID, and XG file ID, and a pair of GCSA and LCP file IDs,
     produce a Directory with "hgvm.vg", "hgvm.xg", "hgvm.gcsa", and
@@ -607,23 +607,35 @@ def hgvm_package_job(job, options, plan, vg_id, xg_id, gcsa_pair):
     
     return hgvm
     
-def graph_to_hgvm_job(job, options, vg_id):
+def graph_to_hgvm_job(job, options, vg_ids):
     """
-    Convert just a vg graph into an HGVM directory with its indexes.
+    Convert a list of vg graphs into an HGVM directory with its indexes.
     
     Used for preparing a graph for realignment.
     
+    Handles vg graph merging, and the selection of a primary path for each graph
+    for indexing.
+    
     """
     
-    # TODO: drop this plan argument on lower-level functions
+    # Merge the graphs
+    merge_job = job.addChildJobFn(merge_vgs_job, options, vg_ids,
+        cores=1, memory="100G", disk="100G")
+    
+    # TODO: don't merge first but instead just bump ID values to be non-
+    # conflicting. TODO: guess the primary path name and pass it through to the
+    # indexing.
+    
     
     # Make the indexes
-    xg_job = job.addChildJobFn(toilvgfacade.xg_index_job, options, [vg_id])
-    gcsa_job = job.addChildJobFn(toilvgfacade.gcsa_index_job, options, [vg_id])
+    xg_job = merge_job.addChildJobFn(toilvgfacade.xg_index_job, options,
+        [merge_job.rv()])
+    gcsa_job = merge_job.addChildJobFn(toilvgfacade.gcsa_index_job, options,
+        [merge_job.rv()])
     
     # Make a packaging job
-    hgvm_job = xg_job.addFollowOnJobFn(hgvm_package_job, options, None, vg_id,
-        xg_job.rv(), gcsa_job.rv())
+    hgvm_job = xg_job.addFollowOnJobFn(hgvm_package_job, options,
+        merge_job.rv(), xg_job.rv(), gcsa_job.rv())
     gcsa_job.addFollowOn(hgvm_job)
     
     # Return its return value
@@ -664,33 +676,19 @@ def hgvm_build_job(job, options, plan):
         plan, explode_job.rv(),
         cores=1, memory="4G", disk="4G")
         
-    # And then merge those VCFs together
-    merge_job = add_job.addFollowOnJobFn(merge_vgs_job, options, plan,
+    # And then a job to merge and index and package it
+    hgvm_job = add_job.addFollowOnJobFn(graph_to_hgvm_job, options,
         add_job.rv(),
-        cores=1, memory="100G", disk="100G")
-    
-    # Add a followon to XG-index it
-    xg_job = merge_job.addFollowOnJobFn(toilvgfacade.xg_index_job, options,
-        [merge_job.rv()])
-    
-    # And another to GCSA-index it
-    gcsa_job = merge_job.addFollowOnJobFn(toilvgfacade.gcsa_index_job, options,
-        [merge_job.rv()])
-    
-    # And a job to package it all up, depending on the XG and GCSA.
-    directory_job = xg_job.addFollowOnJobFn(hgvm_package_job, options, plan,
-        merge_job.rv(), xg_job.rv(), gcsa_job.rv(),
-        cores=1, memory="2G", disk="1G")
-    gcsa_job.addFollowOn(directory_job)
+        cores=1, memory="4G", disk="4G")
     
     if options.dump_hgvm is not None:
         # And another job to dump it
         def dump(job, hgvm):
             hgvm.dump(job.fileStore, options.dump_hgvm)
-        ToilPromise.wrap(directory_job).then_job_fn(dump)
+        ToilPromise.wrap(hgvm_job).then_job_fn(dump)
     
     # Return the Directory with the packaged HGVM
-    return directory_job.rv()
+    return hgvm_job.rv()
     
 def merge_gam_job(job, options, gam_ids):
     """
@@ -1193,7 +1191,7 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
             # Then do the calling
             call_job = pileup_job.addFollowOnJobFn(call_on_hgvm_job, options,
                 hgvm, pileup_job.rv(),
-                cores=1, memory="50G", disk="50G")
+                cores=1, memory="100G", disk="50G")
             # And a promise for the call results directory.
             call_promise = ToilPromise.wrap(call_job)
             
@@ -1215,7 +1213,7 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
                 
                 # First reindex and package the sample itself as an HGVM
                 package_job = subset_job.addFollowOnJobFn(
-                    graph_to_hgvm_job, options, subset_job.rv())
+                    graph_to_hgvm_job, options, [subset_job.rv()])
                 
                 # Then realign and grab the realigned GAM
                 realign_job = package_job.addFollowOnJobFn(
@@ -1441,7 +1439,7 @@ def hgvm_sv_recall_job(job, options, plan, recall_plan, hgvm):
     # Then do the calling
     call_job = pileup_job.addFollowOnJobFn(call_on_hgvm_job, options,
         hgvm, pileup_job.rv(), vcf=True,
-        cores=1, memory="50G", disk="50G")
+        cores=1, memory="100G", disk="50G")
     # And a promise for the call results directory.
     call_promise = ToilPromise.wrap(call_job)
     
