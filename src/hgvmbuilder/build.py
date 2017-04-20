@@ -493,8 +493,9 @@ def explode_vg_job(job, options, plan, vg_id):
 def add_variants_to_parts_job(job, options, plan, paths_by_part):
     """
     Given a dict from vg file ID to the paths in that VG file, work out the VCF
-    files for each VG file and run jobs to add their variants. Return a list of
-    vg IDs for the graphs with variants added.
+    files for each VG file and run jobs to add their variants. Return a dict of
+    the same shape (vg graph ID to list of path names), but with the graph IDs
+    replaced by IDs fro graphs with the variants added.
     
     """
     
@@ -510,8 +511,11 @@ def add_variants_to_parts_job(job, options, plan, paths_by_part):
             
         vcfs_by_path[chromosome].append(vcf_id)
     
-    # Make a list of promises for updated vg graph file IDs
-    to_return = []
+    # Make a list of ToilPromises for updated vg graph file IDs
+    updated_graphs = []
+    
+    # And a list of the lists of path names that go with them
+    path_lists = []
     
     for vg_id, paths in paths_by_part.iteritems():
         # For each VG graph
@@ -525,9 +529,16 @@ def add_variants_to_parts_job(job, options, plan, paths_by_part):
         child = job.addChildJobFn(add_variants_job, options, plan, vg_id,
             vcfs, cores=2, memory="100G", disk="50G")
             
-        to_return.append(child.rv())
+        updated_graphs.append(ToilPromise.wrap(child))
         
-    return to_return
+        # And remember the paths in the graph
+        path_lists.append(paths)
+        
+    # Wait for all the graphs to be done, use their IDs as dict keys in a dict
+    # of path name lists, and return that.
+    return ToilPromise.all(updated_graphs
+        ).then(lambda graph_ids: dict(itertools.izip(graph_ids, path_lists))
+        ).unwrap_result()
         
         
 def hals_and_vgs_to_vg_job(job, options, plan, hal_ids, vg_ids):
@@ -656,15 +667,17 @@ def hgvm_package_job(job, options, vg_id, xg_id, gcsa_pair):
     
     return hgvm
     
-def graphs_to_hgvm_job(job, options, vg_ids):
+def graphs_to_hgvm_job(job, options, vg_ids, primary_paths=None):
     """
     Convert a list of vg graphs into an HGVM directory with its indexes.
     
+    Can take a list of primary path names (or "") for each vg graph, for use
+    with GCSA indexing. Those paths' nodes and edges are not pruned from the
+    index for their graphs.
+    
     Used for preparing a graph for realignment.
     
-    Handles vg graph merging, and the selection of a primary path for each graph
-    for indexing.
-    
+    Handles vg graph merging.
     """
     
     # Shift all the graphs so their ID ranges don't conflict
@@ -680,8 +693,10 @@ def graphs_to_hgvm_job(job, options, vg_ids):
     # Make the indexes using the individual graph files
     xg_job = shift_job.addFollowOnJobFn(toilvgfacade.xg_index_job, options,
         shift_job.rv())
+    # Forward the primary paths on to the GCSA indexer, if specified, so they
+    # can always be included.
     gcsa_job = shift_job.addFollowOnJobFn(toilvgfacade.gcsa_index_job, options,
-        shift_job.rv())
+        shift_job.rv(), primary_paths)
     
     # Make a packaging job to package along with the single concatenated graph
     hgvm_job = xg_job.addFollowOnJobFn(hgvm_package_job, options,
@@ -722,18 +737,47 @@ def hgvm_build_job(job, options, plan):
         vg_job.rv(),
         cores=1, memory="100G", disk="100G")
         
-    # And add all the appropriate VCFs to each
+    # And add all the appropriate VCFs to each. Get a dict from updated graph
+    # file ID to the list of paths it contains.
     add_job = explode_job.addFollowOnJobFn(add_variants_to_parts_job, options,
         plan, explode_job.rv(),
         cores=1, memory="4G", disk="4G")
         
-    # And then a job to merge and index and package it
-    hgvm_job = add_job.addFollowOnJobFn(graphs_to_hgvm_job, options,
-        add_job.rv(),
+    # Unpack that dict into keys and shortest path names (or empty strings)
+    def reswizzle_path_names(paths_by_graph):
+        # Return a pair of lists of graph IDs and corresponding inferred primary
+        # path names. The primary path names are the shortest-named paths in
+        # each graph, or "" if the graph has no paths.
+        
+        graph_ids = []
+        primary_paths = []
+        
+        for graph_id, path_names in paths_by_graph.iteritems():
+            # Order all the graphs
+            graph_ids.append(graph_id)
+            if len(path_names) == 0:
+                # No primary path available for this chunk
+                primary_paths.append("")
+            else:
+                # Grab the shortest name, sorting next by string value
+                primary_paths.append(sorted(sorted(path_names), key=len)[0])
+                
+        RealtimeLogger.info("Guessed primary paths: {}".format(primary_paths))
+        
+        # Return the graphs and their guessed primary paths in the same order
+        return graph_ids, primary_paths
+    # Actually run that on the graph-id-to-name-list dict and get the promise
+    reswizzle_promise = ToilPromise.wrap(add_job).then(reswizzle_path_names)
+        
+    # And then a job to merge and index and package it, using the primary paths
+    # we just guessed for indexing. This job runs after the promise's job.
+    hgvm_job = reswizzle_promise.addFollowOnJobFn(
+        graphs_to_hgvm_job, options, reswizzle_promise.unwrap_result(0),
+        primary_paths=reswizzle_promise.unwrap_result(1),
         cores=1, memory="4G", disk="4G")
     
     if options.dump_hgvm is not None:
-        # And another job to dump it
+        # Dump the hgvm directory from the filestore to local disk
         def dump(job, hgvm):
             hgvm.dump(job.fileStore, options.dump_hgvm)
         ToilPromise.wrap(hgvm_job).then_job_fn(dump)
