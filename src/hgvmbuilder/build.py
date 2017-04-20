@@ -387,6 +387,55 @@ def merge_vgs_job(job, options, vg_ids):
             
         return vg_id
         
+def shift_vgs_job(job, options, vg_ids):
+    """
+    Given a list of VG graph IDs, reassign the node IDs in the vg graphs so that
+    they do not conflict. Returns a list of modified graph file IDs.
+    
+    """
+    
+    if len(vg_ids) < 2:
+        # Nothing to do because there are no possible conflicts with less than 2
+        # graphs
+        return vg_ids
+    
+    # First get all the ID pairs for all the graphs
+    id_promises = [ToilPromise.wrap(job.addChildJobFn(toilvgfacade.id_range_job,
+        options, vg)) for vg in vg_ids]
+        
+    # Then make jobs to shift all the graphs up. TODO: we could make this more
+    # parallel by starting to shift the early graphs before we know how big the
+    # late graphs are, with a sort of cascade.
+    def shift_all(job, ranges):
+        # This is an inline job to actually do all the shifting.
+        # This holds the shift job RVs
+        shift_results = []
+        # This holds the max used ID
+        used_ids = 0
+        
+        RealtimeLogger.info("Found ranges: {}".format(ranges))
+        
+        for (start, stop), vg_id in itertools.izip(ranges, vg_ids):
+            # For each graph and its ID range
+            
+            # How much should it shift? Note that if we start at the max used ID
+            # we need to shift by 1. Don't bother shifting down.
+            shift = max(used_ids - start + 1, 0)
+            
+            # Shift it up
+            shift_results.append(job.addChildJobFn(
+                toilvgfacade.id_increment_job, options, vg_id, shift).rv())
+            
+            # What's the last ID we end up using?
+            used_ids = stop + shift
+            
+        # Give back all the shifted graph IDs
+        return shift_results
+            
+        
+    # Return the result which is the list of shifted VG graph file IDs.
+    return ToilPromise.all(id_promises).then_job_fn(shift_all).unwrap_result()
+    
 def explode_vg_job(job, options, plan, vg_id):
     """
     Explode the given vg file into connected component subgraphs.
@@ -607,7 +656,7 @@ def hgvm_package_job(job, options, vg_id, xg_id, gcsa_pair):
     
     return hgvm
     
-def graph_to_hgvm_job(job, options, vg_ids):
+def graphs_to_hgvm_job(job, options, vg_ids):
     """
     Convert a list of vg graphs into an HGVM directory with its indexes.
     
@@ -618,25 +667,27 @@ def graph_to_hgvm_job(job, options, vg_ids):
     
     """
     
-    # Merge the graphs
-    merge_job = job.addChildJobFn(merge_vgs_job, options, vg_ids,
-        cores=1, memory="100G", disk="100G")
+    # Shift all the graphs so their ID ranges don't conflict
+    shift_job = job.addChildJobFn(shift_vgs_job, options, vg_ids)
     
-    # TODO: don't merge first but instead just bump ID values to be non-
-    # conflicting. TODO: guess the primary path name and pass it through to the
+    # Merge the graphs without changing IDs, by concatenation
+    merge_job = shift_job.addFollowOnJobFn(concat_job, options, vg_ids,
+        cores=1, memory="4G", disk="100G")
+    
+    # TODO: guess the primary path name and pass it through to the
     # indexing.
     
+    # Make the indexes using the individual graph files
+    xg_job = shift_job.addFollowOnJobFn(toilvgfacade.xg_index_job, options,
+        shift_job.rv())
+    gcsa_job = shift_job.addFollowOnJobFn(toilvgfacade.gcsa_index_job, options,
+        shift_job.rv())
     
-    # Make the indexes
-    xg_job = merge_job.addChildJobFn(toilvgfacade.xg_index_job, options,
-        [merge_job.rv()])
-    gcsa_job = merge_job.addChildJobFn(toilvgfacade.gcsa_index_job, options,
-        [merge_job.rv()])
-    
-    # Make a packaging job
+    # Make a packaging job to package along with the single concatenated graph
     hgvm_job = xg_job.addFollowOnJobFn(hgvm_package_job, options,
         merge_job.rv(), xg_job.rv(), gcsa_job.rv())
     gcsa_job.addFollowOn(hgvm_job)
+    merge_job.addFollowOn(hgvm_job)
     
     # Return its return value
     return hgvm_job.rv()
@@ -677,7 +728,7 @@ def hgvm_build_job(job, options, plan):
         cores=1, memory="4G", disk="4G")
         
     # And then a job to merge and index and package it
-    hgvm_job = add_job.addFollowOnJobFn(graph_to_hgvm_job, options,
+    hgvm_job = add_job.addFollowOnJobFn(graphs_to_hgvm_job, options,
         add_job.rv(),
         cores=1, memory="4G", disk="4G")
     
@@ -690,25 +741,25 @@ def hgvm_build_job(job, options, plan):
     # Return the Directory with the packaged HGVM
     return hgvm_job.rv()
     
-def merge_gam_job(job, options, gam_ids):
+def concat_job(job, options, file_ids):
     """
-    Merge zero or more GAM files into one by concatenation. Returns the merged
-    file ID.
+    Merge zero or more VG protobuf files into one by concatenation. Returns the
+    merged file ID.
     
     """
     
-    with job.fileStore.writeGlobalFileStream() as (gam_handle, gam_id):
+    with job.fileStore.writeGlobalFileStream() as (cat_handle, cat_id):
         # Make one merged file
         
-        for part_id in gam_ids:
-            # For each part GAM
+        for part_id in file_ids:
+            # For each part file
             with job.fileStore.readGlobalFileStream(part_id) as part_handle:
                 # Open it
                 
-                # And stream it to the combined GAM
-                shutil.copyfileobj(part_handle, gam_handle)
+                # And stream it to the combined file
+                shutil.copyfileobj(part_handle, cat_handle)
     
-    return gam_id
+    return cat_id
     
 def split_records_job(job, options, file_ids, lines_per_record=4,
     records_per_part=100000):
@@ -835,7 +886,7 @@ def align_to_hgvm_chunked_job(job, options, hgvm, fastqs=[],
     # After splitting, do all the alignments, then merge the GAMs and return
     # that
     return ToilPromise.wrap(split_job).then_job_fn(do_alignments).then_job_fn(
-        merge_gam_job, options).unwrap_result()
+        concat_job, options).unwrap_result()
     
     
     
@@ -1213,7 +1264,7 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
                 
                 # First reindex and package the sample itself as an HGVM
                 package_job = subset_job.addFollowOnJobFn(
-                    graph_to_hgvm_job, options, [subset_job.rv()])
+                    graphs_to_hgvm_job, options, [subset_job.rv()])
                 
                 # Then realign and grab the realigned GAM
                 realign_job = package_job.addFollowOnJobFn(

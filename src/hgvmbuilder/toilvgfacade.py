@@ -17,10 +17,15 @@ import logging
 import urlparse
 import shutil
 import argparse
+import timeit
 
 import toil_vg.vg_common
 import toil_vg.vg_config
 import toil_vg.vg_index
+
+from toil.realtimeLogger import RealtimeLogger
+
+from .toilpromise import ToilPromise
 
 
 Logger = logging.getLogger("toilvgfacade")
@@ -155,7 +160,7 @@ def xg_index_job(job, options, vg_ids):
     # stuff, so just drop it in the current directory. It doesn't read it back.
     options.out_store = "file:."
 
-    # Don't use it instead of the filestore
+    # Don't use outstore instead of the file store
     options.force_outstore = False
     
     # Pretend we're the pipeline tool
@@ -194,7 +199,7 @@ def gcsa_index_job(job, options, vg_ids, primary_path_names=None):
     # stuff, so just drop it in the current directory. It doesn't read it back.
     options.out_store = "file:."
 
-    # Don't use it instead of the filestore
+    # Don't use outstore instead of the file store
     options.force_outstore = False
     
     # Pretend we're the pipeline tool
@@ -225,7 +230,103 @@ def gcsa_index_job(job, options, vg_ids, primary_path_names=None):
         cores=options.misc_cores, memory=options.misc_mem,
         disk=options.misc_disk).rv()
         
+def id_range_job(job, options, vg_id):
+    """
+    Find the first and last ID in the given VG file and return them as a tuple.
+    
+    """
+    
+    # Strip out stuff we don't want and apply config defaults
+    options = sanitize_options(options)
+    
+    # We need an options.chroms, because the job we're running returns an entry
+    # form it.
+    options.chroms = [None]
+    
+    # Don't use outstore instead of the file store
+    options.force_outstore = False
+    
+    # Run the job and return the start and end IDs as a pair of ints (dropping
+    # the chrom name)
+    return ToilPromise.wrap(job.addChildJobFn(toil_vg.vg_index.run_id_range,
+        options, 0, vg_id,
+        cores=options.misc_cores, memory=options.misc_mem,
+        disk=options.misc_disk)
+        ).then(lambda (name, start, end): (int(start), int(end))
+        ).unwrap_result()
+        
+def id_increment_job(job, options, vg_id, distance):
+    """
+    Increment all the node IDs in the given vg graph by the given distance.
+    Return a new vg graph file ID.
+    
+    Not actually in toil-vg, but we put it here so all the vg-touching functions
+    can live in one place.
+    
+    """
+    
+    if distance == 0:
+        # No need to shift at all
+        return vg_id
+    
+    # Strip out stuff we don't want and apply config defaults
+    options = sanitize_options(options)
+    
+    # We need an options.chroms, because the job we're running uses it for local
+    # filenames
+    options.chroms = ["increment"]
+    
+    # Don't use outstore instead of the file store
+    options.force_outstore = False
+    
+    return job.addChildJobFn(run_id_increment, options, 0, vg_id, distance,
+        cores=options.misc_cores, memory=options.misc_mem,
+        disk=options.misc_disk).rv()
+    
+def run_id_increment(job, options, graph_i, graph_id, distance):
+    """
+    Actually do the ID incrementing. Is a separate, toil-vg-style job so it
+    can be added to toil-vg and so we can set the correct resource requirements.
+    
+    """
+    
+    RealtimeLogger.info("Starting graph shift...")
+    start_time = timeit.default_timer()
+    
+    work_dir = job.fileStore.getLocalTempDir()
 
+    # download graph
+    graph_filename = os.path.join(work_dir, '{}.vg'.format(
+        options.chroms[graph_i]))
+    toil_vg.vg_common.read_from_store(job, options, graph_id, graph_filename)
+
+    # Output
+    output_graph_filename = graph_filename + '.shifted.vg'
+   
+    RealtimeLogger.info("Moving {} up by {} to {}".format(
+        graph_filename, distance, output_graph_filename))
+
+    with open(output_graph_filename, "w") as out_file:
+        command = ['vg', 'ids', '--increment', str(distance),
+            os.path.basename(graph_filename)]
+        options.drunner.call(job, command, work_dir=work_dir, outfile=out_file)
+
+    # Back to store
+    output_graph_id = toil_vg.vg_common.write_to_store(job, options,
+        output_graph_filename)
+    
+    end_time = timeit.default_timer()
+    run_time = end_time - start_time
+    RealtimeLogger.info("Finished graph shift. Process took {} seconds.".format(
+        run_time))
+
+    return output_graph_id
+    
+    
+    
+    
+    
+    
 
 
 
