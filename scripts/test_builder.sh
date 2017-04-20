@@ -10,6 +10,8 @@ rm -Rf test_tree test_build
     --vcf_url file:`pwd`/test/tiny.vcf \
     --sv_sample_name "1" \
     --sv_sample_fastq_url file:`pwd`/test/tiny.fastq \
+    --sv_sample_name "2" \
+    --sv_sample_fastq_url file:`pwd`/test/tiny.fastq \
     --logInfo \
     --realTimeLogging \
     --sample_fastq_url file:`pwd`/test/tiny.fastq \

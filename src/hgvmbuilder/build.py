@@ -22,6 +22,7 @@ import subprocess
 import sys
 import collections
 import itertools
+import more_itertools
 import shutil
 import datetime
 import uuid
@@ -128,12 +129,21 @@ def parse_args(args):
         
     # For SV calling and comparison against truth evaluaton
     sv_group = parser.add_argument_group("Structural variant evaluation")
-    sv_group.add_argument("--sv_sample_name", default=None,
+    sv_group.add_argument("--sv_sample_name", action="append", default=[],
         help="evaluate recall of this sample's SVs")
-    sv_group.add_argument("--sv_sample_fastq_url", action="append",
+    
+    # We need reads and we will get them form only one place
+    sv_read_source = sv_group.add_mutually_exclusive_group()
+    
+    # This list is going to hold FASTQs for multiple samples; all samples must
+    # be either paired-end or single-end so we can match them up.
+    sv_read_source.add_argument("--sv_sample_fastq_url", action="append",
         default=[],
-        help="FASTQ for one end of SV evaluation reads")
-    sv_group.add_argument("--sv_sample_gam_url", default=None,
+        help="FASTQ for one end of SV evaluation reads for one sample")
+    # Instead of FASTQs we can use pre-aligned GAMs. But we can only use one or
+    # the other.
+    sv_read_source.add_argument("--sv_sample_gam_url", action="append",
+        default=[],
         help="GAM for pre-aligned evaluation reads instead of FASTQs")
         
     # Output
@@ -227,7 +237,7 @@ def create_eval_plan(control_url, xg_url, gcsa_url, sample_fq_urls,
         
     return eval_plan
     
-def create_recall_plan(sample_fq_urls, gam_url, sample_name):
+def create_recall_plan(sample_fastq_urls, gam_urls, sample_names):
     """
     Create an SVRecallPlan to evaluate structural variant recall for the given
     sample, using the given FASTQs or pre-aligned GAM.
@@ -235,17 +245,52 @@ def create_recall_plan(sample_fq_urls, gam_url, sample_name):
     
     recall_plan = SVRecallPlan()
     
-    for url in sample_fq_urls:
-        # Add all the FASTQs
-        recall_plan.add_fastq(url)
+    for sample_name in sample_names:
+        # Add a sample by this name
+        recall_plan.add_sample_name(sample_name)
         
-    if gam_url is not None:
-        # Add the GAM
-        recall_plan.set_gam_url(gam_url)
+    if len(sample_fastq_urls) == len(sample_names):
+        # Unpaired FASTQ (or no FASTQs)
         
-    if sample_name is not None:
-        # And the sample name
-        recall_plan.set_sample_name(sample_name)
+        for sample_name, sample_fastq_url in itertools.izip(sample_names,
+            sample_fastq_urls):
+            # Operate on one FASTQ per sample, and associate it with the sample
+            recall_plan.add_sample_fastq(sample_name, sample_fastq_url)
+        
+    elif len(sample_fastq_urls) == 2 * len(sample_names):
+        
+        for sample_name, (fastq1, fastq2) in itertools.izip(sample_names,
+            more_itertools.grouper(2, sample_fastq_urls)):
+            # For every sample name and the corresponding pair of FASTQs
+            
+            # Add both the FASTQs for the sample
+            recall_plan.add_sample_fastq(sample_name, fastq1)
+            recall_plan.add_sample_fastq(sample_name, fastq2)
+    
+    elif len(sample_fastq_urls) != 0:
+        # Not sure what the user thinks we're going to be able to do with this
+        # weird mismatched set of FASTQs.
+        raise RuntimeError("Cannot match up {} FASTQs with {} samples; "
+            "provide either all single-end or all paired FASTQs.".format(
+            len(sample_fastq_urls), len(sample_names)))
+    
+    if len(gam_urls) == len(sample_names):
+        # We have one GAM per sample instead of FASTQs
+        
+        for sample_name, gam_url in itertools.izip(sample_names, gam_urls):
+            # Operate on one GAM per sample, and associate it with the sample
+            recall_plan.add_sample_gam(sample_name, gam_url)
+        
+    elif len(gam_urls) != 0:
+        raise RuntimeError("Cannot match up {} GAMs with {} samples.".format(
+            len(gam_urls), len(sample_names)))
+            
+    if (len(gam_urls) == 0 and len(sample_fastq_urls) == 0 and
+        len(sample_names) > 0):
+        # We have no reads for our samples!
+        raise RuntimeError("Cannot do recall evaluation on any samples "
+            "without reads for them")
+        
         
     return recall_plan
     
@@ -1521,20 +1566,28 @@ def hgvm_sv_recall_job(job, options, plan, recall_plan, hgvm):
     
     # Make sure we have everything we would need to actually do this job
     
-    if recall_plan.get_gam_id() is not None:
+    if len(recall_plan.get_sample_names()) == 0:
+        # Don't do anything!
+        return Directory()
+    
+    # For now just handle the first sample
+    sample_name = recall_plan.get_sample_names()[0]
+    
+    if recall_plan.get_gam_id(sample_name) is not None:
         # We can just use this GAM
         align_promise = ToilPromise.resolve(job, Directory(
-            {"aligned.gam": recall_plan.get_gam_id()}))
+            {"aligned.gam": recall_plan.get_gam_id(sample_name)}))
         # Do the pileup as a child
         pileup_job = job.addChildJobFn(pileup_on_hgvm_job, options,
-            hgvm, recall_plan.get_gam_id(),
+            hgvm, recall_plan.get_gam_id(sample_name),
             cores=1, memory="50G", disk="100G")
     else:
         # We have to actually align some FASTQs    
-        fastqs=recall_plan.get_fastq_ids()
-        if len(fastqs) == 0 or recall_plan.get_sample_name() is None:
-            # Nothing to do!
-            return Directory()
+        fastqs=recall_plan.get_fastq_ids(sample_name)
+        if len(fastqs) == 0:
+            # We have a sample with no FASTQ and no GAM
+            raise RuntimeError("No reads available for recall evaluation "
+                "on {}".format(sample_name))
         
         # Align the reads
         align_job = job.addChildJobFn(align_to_hgvm_chunked_job, options,
@@ -1571,7 +1624,7 @@ def hgvm_sv_recall_job(job, options, plan, recall_plan, hgvm):
     # Compare the expected variants to the observed variants and compute the
     # fraction recalled
     compare_job = call_job.addFollowOnJobFn(measure_sv_recall_job, options,
-        call_job.rv(), truth_vcfs, recall_plan.get_sample_name(),
+        call_job.rv(), truth_vcfs, sample_name,
         cores=1, memory="8G", disk="100G")
     # And add a promise for its results Directory
     compare_promise = ToilPromise.wrap(compare_job)
