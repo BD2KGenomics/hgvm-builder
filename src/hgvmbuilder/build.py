@@ -23,6 +23,7 @@ import sys
 import collections
 import itertools
 import shutil
+import datetime
 
 import tsv
 import intervaltree
@@ -44,6 +45,7 @@ from .directory import Directory
 from .toilpromise import ToilPromise
 from .version import version
 from . import toilvgfacade
+from .manifest import Manifest
 
 # Get a submodule-global logger
 Logger = logging.getLogger("build")
@@ -648,11 +650,11 @@ def add_variants_job(job, options, plan, vg_id, vcf_ids):
     
     return new_vg_id
     
-def hgvm_package_job(job, options, vg_id, xg_id, gcsa_pair):
+def hgvm_package_job(job, options, vg_id, xg_id, gcsa_pair, manifest_id):
     """
-    Given a VG file ID, and XG file ID, and a pair of GCSA and LCP file IDs,
-    produce a Directory with "hgvm.vg", "hgvm.xg", "hgvm.gcsa", and
-    "hgvm.gcsa.lcp" filled in.
+    Given a VG file ID, and XG file ID, a pair of GCSA and LCP file IDs, and a
+    "serialized manifest ID, produce a Directory with "hgvm.vg", "hgvm.xg",
+    ""hgvm.gcsa", hgvm.gcsa.lcp", and "hgvm.json" filled in.
     
     Runs as a Toil job so it will be able to unpack the pair.
     
@@ -664,6 +666,7 @@ def hgvm_package_job(job, options, vg_id, xg_id, gcsa_pair):
     hgvm.add("hgvm.xg", xg_id)
     hgvm.add("hgvm.gcsa", gcsa_pair[0])
     hgvm.add("hgvm.gcsa.lcp", gcsa_pair[1])
+    hgvm.add("hgvm.json", manifest_id)
     
     return hgvm
     
@@ -677,8 +680,16 @@ def graphs_to_hgvm_job(job, options, vg_ids, primary_paths=None):
     
     Used for preparing a graph for realignment.
     
-    Handles vg graph merging.
+    Handles vg graph merging, and produces the hgvm manifest "hgvm.json".
     """
+    
+    # Write the manifest, which will include the primary paths.
+    # We can add more facts here if we want.
+    manifest = Manifest({
+        "hgvm_manifest_version": "0.1",
+        "build_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "primary_paths": primary_paths
+    })
     
     # Shift all the graphs so their ID ranges don't conflict
     shift_job = job.addChildJobFn(shift_vgs_job, options, vg_ids)
@@ -700,7 +711,8 @@ def graphs_to_hgvm_job(job, options, vg_ids, primary_paths=None):
     
     # Make a packaging job to package along with the single concatenated graph
     hgvm_job = xg_job.addFollowOnJobFn(hgvm_package_job, options,
-        merge_job.rv(), xg_job.rv(), gcsa_job.rv())
+        merge_job.rv(), xg_job.rv(), gcsa_job.rv(),
+        manifest.save(job.fileStore))
     gcsa_job.addFollowOn(hgvm_job)
     merge_job.addFollowOn(hgvm_job)
     
@@ -710,7 +722,7 @@ def graphs_to_hgvm_job(job, options, vg_ids, primary_paths=None):
 def hgvm_build_job(job, options, plan):
     """
     Toil job for building the HGVM. Returns a Directory object holding
-    "hgvm.vg", "hgvm.xg", "hgvm.gcsa", and "hgvm.gcsa.lcp".
+    "hgvm.json", "hgvm.vg", "hgvm.xg", "hgvm.gcsa", and "hgvm.gcsa.lcp".
     
     """
     
@@ -1008,6 +1020,10 @@ def call_on_hgvm_job(job, options, hgvm, pileup_id, vcf=False):
     the VCF data as "calls.vcf", and the augmented graph as "augmented.vg".
     
     """
+
+    # Load the manifest, which lists the primary paths, which we want to know
+    # for calling
+    manifest = Manifest.load(job.fileStore, hgvm.get("hgvm.json"))
     
     # Download just the vg
     vg_filename = job.fileStore.readGlobalFile(hgvm.get("hgvm.vg"))
@@ -1018,15 +1034,17 @@ def call_on_hgvm_job(job, options, hgvm, pileup_id, vcf=False):
     # Pick an augmented graph filename
     augmented_filename = job.fileStore.getLocalTempDir() + "/augmented.vg"
     
-    # TODO: don't just guess a ref path. Make call not require one (or allow
-    # many).
-    ref_path = options.vcf_contig[0]
-    if options.add_chr:
-        ref_path = "chr" + ref_path
+    # Make arguments to annotate all the reference paths
+    ref_args = []
+    for ref_path in manifest.get("primary_paths", []):
+        # For every primary path we have defined, tell the caller to use it as a
+        # reference path.
+        ref_args.append("--ref")
+        ref_args.append(ref_path)
     
     # Set up the VG run
-    vg_args = ["vg", "call", "--aug-graph", augmented_filename,
-        "--ref", ref_path, vg_filename, pileup_filename]
+    vg_args = ["vg", "call", "--aug-graph", augmented_filename, vg_filename,
+        pileup_filename] + ref_args
         
     if not vcf:
         # Don'tmake a VCF
