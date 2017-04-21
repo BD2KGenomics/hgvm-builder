@@ -3,7 +3,7 @@
 set -e
 
 rm -Rf test_tree test_build
-./build-hgvm.sh ./test_tree test_build \
+./build-hgvm.sh ./test_tree file:`pwd`/test_build \
     --container None \
     --base_vg_url file:`pwd`/test/tiny-flat.vg \
     --vcf_contig "x" \
@@ -18,4 +18,4 @@ rm -Rf test_tree test_build
     --eval_sequences_url file:`pwd`/test/tiny.seqs \
     --control_graph_url file:`pwd`/test/tiny-flat.vg \
     --control_graph_xg_url file:`pwd`/test/tiny-flat.xg \
-    --control_graph_gcsa_url file:`pwd`/test/tiny-flat.gcsa \
+    --control_graph_gcsa_url file:`pwd`/test/tiny-flat.gcsa

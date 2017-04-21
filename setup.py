@@ -24,7 +24,8 @@ kwargs = dict(
     entry_points={
         'console_scripts': [
             'build-hgvm = hgvmbuilder.build:entrypoint',
-            'copy-hgvm = hgvmbuilder.parallelcopy:entrypoint'
+            'copy-hgvm = hgvmbuilder.parallelcopy:entrypoint',
+            'import-sam-hgvm = hgvmbuilder.importsam:entrypoint'
         ]})
 
 class PyTest(TestCommand):

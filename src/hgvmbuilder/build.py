@@ -147,8 +147,8 @@ def parse_args(args):
         help="GAM for pre-aligned evaluation reads instead of FASTQs")
         
     # Output
-    parser.add_argument("out_dir",
-        help="directory to place the constructed graph parts in")
+    parser.add_argument("out_url",
+        help="file: or other Toil-supported URL to place results in")
     parser.add_argument("--dump_hgvm", default=None, type=os.path.abspath,
         help="dump the HGVM build to the given directory")
     
@@ -1708,8 +1708,7 @@ def main(args):
         
         if toil_instance.options.restart:
             # We're re-running. Grab the root job return value from restart
-            hgvm_directory, eval_directory, recall_directory = \
-                toil_instance.restart()
+            directory = toil_instance.restart()
         else:
             # Run from the top
         
@@ -1744,7 +1743,7 @@ def main(args):
         # Export the results
         directory.export_to(
             lambda id, url: toil_instance.exportFile(id, url),
-            "file:{}".format(options.out_dir))
+            options.out_url)
         
     print("Toil workflow complete")
     return 0
