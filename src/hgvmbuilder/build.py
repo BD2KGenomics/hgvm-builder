@@ -1647,8 +1647,8 @@ def main_job(job, options, plan, eval_plan, recall_plan):
     """
     Root job of the Toil workflow. Build and then evaluate an HGVM.
     
-    Returns a tuple of the packaged HGVM Directory, the realignment evaluation
-    results Directory, and the SV recall results Directory.
+    Returns a fully-structured output Directory. All the master has to do is
+    export it.
     
     """
     
@@ -1678,13 +1678,12 @@ def main_job(job, options, plan, eval_plan, recall_plan):
         recall_plan, build_job.rv(),
         cores=1, memory="2G", disk="1G")
         
-    # At this point we have a problem: if the export code fails (maybe an upload
-    # timeout or something) we lose all our work. TODO: dump some kind of cookie
-    # to console that can be used to fetch everything out of the filestore
-    # (which must still be around)
-        
-    # Return the pair of created Directories
-    return (build_job.rv(), eval_job.rv(), sv_eval_job.rv())
+    # Stick all those directories in a folder structure and return that
+    return ToilPromise.all({
+        "hgvm": ToilPromise.wrap(build_job),
+        "eval/realignment": ToilPromise.wrap(eval_job),
+        "eval/sv": ToilPromise.wrap(sv_eval_job)
+    }).then(lambda dirs: Directory().mount_all(dirs)).unwrap_result()
     
 def main(args):
     """
@@ -1739,17 +1738,11 @@ def main(args):
                 recall_plan,
                 cores=1, memory="1G", disk="1G")
             
-            # Run the root job and get the packaged HGVM and its evaluations as
-            # Directories.
-            hgvm_directory, eval_directory, recall_directory = \
-                toil_instance.start(root_job)
+            # Run the root job and get the final output directory
+            directory = toil_instance.start(root_job)
         
-        # Stick the evaluations in the HGVM directory for now
-        hgvm_directory.mount("eval", eval_directory)
-        hgvm_directory.mount("recall", recall_directory)
-            
-        # Export the HGVM
-        hgvm_directory.export_to(
+        # Export the results
+        directory.export_to(
             lambda id, url: toil_instance.exportFile(id, url),
             "file:{}".format(options.out_dir))
         
