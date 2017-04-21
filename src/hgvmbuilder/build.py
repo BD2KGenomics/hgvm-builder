@@ -1570,69 +1570,78 @@ def hgvm_sv_recall_job(job, options, plan, recall_plan, hgvm):
         # Don't do anything!
         return Directory()
     
-    # For now just handle the first sample
-    sample_name = recall_plan.get_sample_names()[0]
+    # Otherwise, we fill this with promises for directories, one per sample
+    sample_promises = []
     
-    if recall_plan.get_gam_id(sample_name) is not None:
-        # We can just use this GAM
-        align_promise = ToilPromise.resolve(job, Directory(
-            {"aligned.gam": recall_plan.get_gam_id(sample_name)}))
-        # Do the pileup as a child
-        pileup_job = job.addChildJobFn(pileup_on_hgvm_job, options,
-            hgvm, recall_plan.get_gam_id(sample_name),
-            cores=1, memory="50G", disk="100G")
-    else:
-        # We have to actually align some FASTQs    
-        fastqs=recall_plan.get_fastq_ids(sample_name)
-        if len(fastqs) == 0:
-            # We have a sample with no FASTQ and no GAM
-            raise RuntimeError("No reads available for recall evaluation "
-                "on {}".format(sample_name))
-        
-        # Align the reads
-        align_job = job.addChildJobFn(align_to_hgvm_chunked_job, options,
-            hgvm, fastqs=fastqs,
-            cores=16, memory="50G", disk="100G")
-        # Put it in a Directory in a promise
-        align_promise = ToilPromise.wrap(align_job).then(
-            lambda id: Directory({"aligned.gam": id}))
+    for sample_name in recall_plan.get_sample_names():
+        # For each sample we want to compute recall for
+    
+        if recall_plan.get_gam_id(sample_name) is not None:
+            # We can just use this GAM
+            align_promise = ToilPromise.resolve(job, Directory(
+                {"aligned.gam": recall_plan.get_gam_id(sample_name)}))
+            # Do the pileup as a child
+            pileup_job = job.addChildJobFn(pileup_on_hgvm_job, options,
+                hgvm, recall_plan.get_gam_id(sample_name),
+                cores=1, memory="50G", disk="100G")
+        else:
+            # We have to actually align some FASTQs    
+            fastqs=recall_plan.get_fastq_ids(sample_name)
+            if len(fastqs) == 0:
+                # We have a sample with no FASTQ and no GAM
+                raise RuntimeError("No reads available for recall evaluation "
+                    "on {}".format(sample_name))
             
-        # Then do the pileup as a follow-on
-        pileup_job = align_job.addFollowOnJobFn(pileup_on_hgvm_job, options,
-            hgvm, align_job.rv(),
-            cores=1, memory="50G", disk="100G")
-    # Put it in a Directory in a promise
-    pileup_promise = ToilPromise.wrap(pileup_job).then(
-        lambda id: Directory({"pileup.vgpu": id}))
+            # Align the reads
+            align_job = job.addChildJobFn(align_to_hgvm_chunked_job, options,
+                hgvm, fastqs=fastqs,
+                cores=16, memory="50G", disk="100G")
+            # Put it in a Directory in a promise
+            align_promise = ToilPromise.wrap(align_job).then(
+                lambda id: Directory({"aligned.gam": id}))
+                
+            # Then do the pileup as a follow-on
+            pileup_job = align_job.addFollowOnJobFn(pileup_on_hgvm_job, options,
+                hgvm, align_job.rv(),
+                cores=1, memory="50G", disk="100G")
+        # Put it in a Directory in a promise
+        pileup_promise = ToilPromise.wrap(pileup_job).then(
+            lambda id: Directory({"pileup.vgpu": id}))
+        
+        # Then do the calling
+        call_job = pileup_job.addFollowOnJobFn(call_on_hgvm_job, options,
+            hgvm, pileup_job.rv(), vcf=True,
+            cores=1, memory="100G", disk="50G")
+        # And a promise for the call results directory.
+        call_promise = ToilPromise.wrap(call_job)
+        
+        # Collect the expected variants from all the input VCFs for the
+        # chromosomes we did
+        truth_vcfs = []
+        for chromosome in plan.for_each_chromosome():
+            # TODO: limit to just the contigs we are actually doing, somehow...
+            for vcf_id in plan.get_vcf_ids(chromosome):
+                # Aggregate into a list of VCFs
+                truth_vcfs.append(vcf_id)
+        
+        # Compare the expected variants to the observed variants and compute the
+        # fraction recalled
+        compare_job = call_job.addFollowOnJobFn(measure_sv_recall_job, options,
+            call_job.rv(), truth_vcfs, sample_name,
+            cores=1, memory="8G", disk="100G")
+        # And add a promise for its results Directory
+        compare_promise = ToilPromise.wrap(compare_job)
     
-    # Then do the calling
-    call_job = pileup_job.addFollowOnJobFn(call_on_hgvm_job, options,
-        hgvm, pileup_job.rv(), vcf=True,
-        cores=1, memory="100G", disk="50G")
-    # And a promise for the call results directory.
-    call_promise = ToilPromise.wrap(call_job)
-    
-    # Collect the expected variants from all the input VCFs for the chromosomes
-    # we did
-    truth_vcfs = []
-    for chromosome in plan.for_each_chromosome():
-        # TODO: limit to just the contigs we are actually doing, somehow...
-        for vcf_id in plan.get_vcf_ids(chromosome):
-            # Aggregate into a list of VCFs
-            truth_vcfs.append(vcf_id)
-    
-    # Compare the expected variants to the observed variants and compute the
-    # fraction recalled
-    compare_job = call_job.addFollowOnJobFn(measure_sv_recall_job, options,
-        call_job.rv(), truth_vcfs, sample_name,
-        cores=1, memory="8G", disk="100G")
-    # And add a promise for its results Directory
-    compare_promise = ToilPromise.wrap(compare_job)
-    
-    # Return all that as a Directory
-    return ToilPromise.all([align_promise, pileup_promise, call_promise,
-        compare_promise]).then(
-        lambda dirs: dirs[0].merge(*dirs[1:])).unwrap_result()
+        # Promise all that in a Directory
+        sample_promises.append(ToilPromise.all([align_promise, pileup_promise,
+            call_promise, compare_promise]).then(
+            lambda dirs: dirs[0].merge(*dirs[1:])))
+         
+    # Mount all the per-sample directories under their sample names   
+    return ToilPromise.all(sample_promises
+        ).then(lambda dirs: Directory().mount_all(
+        dict(itertools.izip(recall_plan.get_sample_names(), dirs)))
+        ).unwrap_result()
     
 def main_job(job, options, plan, eval_plan, recall_plan):
     """
