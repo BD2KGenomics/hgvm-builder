@@ -34,6 +34,12 @@ export AZURE_STORAGE_CONNECTION_STRING='DefaultEndpointsProtocol=https;AccountNa
 
 Use the `scripts/toilAzureCleanup.sh` script to clear out old undeleted job stores that Toil may leave lying about.
 
+Upload your data to Azure with copy-hgvm:
+
+```
+PYTHONPATH="src" python -m hgvmbuilder.parallelcopy ./tree file:./things azure:account:container/path/to/things
+```
+
 ## Project Roadmap
 
 Data from a variety of sources will be combined to build the HGVM.

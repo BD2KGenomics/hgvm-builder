@@ -22,7 +22,10 @@ kwargs = dict(
     package_dir={'': 'src'},
     packages=find_packages('src'),
     entry_points={
-        'console_scripts': ['build-hgvm = hgvmbuilder.build:entrypoint']})
+        'console_scripts': [
+            'build-hgvm = hgvmbuilder.build:entrypoint',
+            'copy-hgvm = hgvmbuilder.parallelcopy:entrypoint'
+        ]})
 
 class PyTest(TestCommand):
     user_options = [('pytest-args=', 'a', "Arguments to pass to py.test")]
