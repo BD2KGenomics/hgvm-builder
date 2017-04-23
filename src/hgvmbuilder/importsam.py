@@ -84,8 +84,12 @@ def extract_job(job, options, sam_url):
     Return a pair of FASTQ file IDs.
     """
     
+    # We have to deal with relative paths relative to here if we want Docker to
+    # work right
+    work_dir = job.fileStore.getLocalTempDir()
+    
     # Let's just download the whole bam
-    sorted_bam = job.fileStore.getLocalTempDir() + "/sorted.bam"
+    sorted_bam = "sorted.bam"
     
     # We need a prefix for temp files
     temp_prefix = sorted_bam + ".part"
@@ -95,10 +99,10 @@ def extract_job(job, options, sam_url):
     # Sort reads by name to a BAM file. If we don't give a temp file prefix it
     # tries to write the temp files back to the FTP.
     options.drunner.call(job, [["samtools", "sort", "-n", "-o",
-        sorted_bam, "-T", temp_prefix, sam_url]])
+        sorted_bam, "-T", temp_prefix, sam_url]], work_dir=work_dir)
         
     # Save to file store
-    bam_id = job.fileStore.writeGlobalFile(sorted_bam)
+    bam_id = job.fileStore.writeGlobalFile(os.path.join(work_dir, sorted_bam))
     
     # Convert and return FASTQs
     return job.addChildJobFn(convert_job, options, sam_url, bam_id,
@@ -109,12 +113,19 @@ def convert_job(job, options, sam_url, bam_id):
     Subset and convert BAM to FASTQ pair. Returns FASTQ IDs.
     """
     
-    # Read the BAM back
-    sorted_bam = job.fileStore.readGlobalFile(bam_id)
+    # We have to deal with relative paths relative to here if we want Docker to
+    # work right
+    work_dir = job.fileStore.getLocalTempDir()
+    
+    # Read the BAM back, into the work_dir
+    sorted_bam = "sorted.bam"
+    job.fileStore.readGlobalFile(bam_id, os.path.join(work_dir, sorted_bam))
         
     RealtimeLogger.info("Subset {} to SAM".format(sam_url))
         
-    # Then stream to SAM and select just the reads we want
+    # Then stream to SAM and select just the reads we want. This file is used by
+    # this Python code as a soy-based FIFO substitute, and so doesn't need to be
+    # in work_dir.
     subset_sam = job.fileStore.getLocalTempDir() + "/subset.sam"
     
     # We start out with just a view pipeline
@@ -126,7 +137,8 @@ def convert_job(job, options, sam_url, bam_id):
             ("{if ($3 ~ /" + options.contig + "(_.*)?$/ || $7 ~ /" + 
             options.contig + "(_.*)?$/) print}")])
     
-    options.drunner.call(job, sam_command, outfile=open(subset_sam, "w"))
+    options.drunner.call(job, sam_command, outfile=open(subset_sam, "w"),
+        work_dir=work_dir)
         
     RealtimeLogger.info("Convert {} to FASTQ".format(sam_url))
     
