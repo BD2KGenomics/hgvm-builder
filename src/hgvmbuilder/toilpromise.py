@@ -59,9 +59,8 @@ class ToilPromise(object):
         # These fields don't pickle
         
         # This Toil job represents the actual execution of the promise. All the
-        # handlers will run as follow-ons. It can't be filled in until all our
-        # handlers are set, because it pickles the handlers. This job will
-        # return the promise's success result and its error, as a pair.
+        # handlers will run as follow-ons. This job will return the promise's
+        # success result and its error, as a pair.
         self.promise_job = None
         
         # We might get an extra return value unpacking job
@@ -199,7 +198,7 @@ class ToilPromise(object):
         
         return self.promise_job.rv()
 
-    def unwrap_result(self):
+    def unwrap_result(self, *args):
         """
         You can get the Toil return value .rv() for just its resolve value, or
         None if it rejects.
@@ -209,6 +208,9 @@ class ToilPromise(object):
         
         You can use this to convert from promises back to normal Toil style
         code, but if a converted promise rejects, it will kill the workflow.
+        
+        You can also pass a toil-style path (anything you would pass to .rv())
+        and it will be used to pull stuff out of the result that got unwrapped.
         
         Should only be used in the parent job of the entire promise tree.
         
@@ -223,7 +225,34 @@ class ToilPromise(object):
                 get_resolve_value_job, self.promise_job.rv())
                 
         # Once that job exists once, we can just grab its rv().
-        return self.unpack_resolve_job.rv()
+        return self.unpack_resolve_job.rv(*args)
+        
+    def get_last_job(self):
+        """
+        Grab the Toil job that you need to be a follow-on of in order to safely
+        use the result of .unwrap() or .unwrap_result().
+        
+        You might want to use addFollowOnJobFn instead if you want Toil code to
+        wait on a promise.
+        
+        """
+        
+        # Because unwrap_result uses another joib, we return that one.
+        
+        # Make sure it exists
+        self.unwrap_result()
+        # Return it
+        return self.unpack_resolve_job
+        
+    def addFollowOnJobFn(self, *args, **kwargs):
+        """
+        Add a Toil job as a follow-on of the last job that can possibly belong
+        to this promise. That Toil follow on will be able to read the result of
+        .unwrap() or .unwrap_result().
+        
+        """
+        
+        return self.get_last_job().addFollowOnJobFn(*args, **kwargs)
         
     @staticmethod
     def resolve(parent_job, result):

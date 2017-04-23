@@ -1,5 +1,6 @@
 #hgvm-builder evaluation.py: Represent reference graph evaluation regimines as objects
 
+import collections
 import logging
 
 from .directory import Directory
@@ -235,70 +236,72 @@ class SVRecallPlan(object):
         Make a new empty evaluation plan
         """
         
-        # We have the sample we're supposed to be using
-        self.sample_name = None
+        # We have the samples we're supposed to be using
+        self.sample_names = []
         
         # We have one set of fields that are populated as the plan is built, and
         # another set of fields that get populated when we import the input
         # files into Toil.
         
         # These all hold the URLs that we get given when building up the plan.
-        # This will hold 2 FASTQ URLs.
-        self.fastq_urls = []
-        # This will hold a GAM URL to use instead of the FASTQs
-        self.gam_url = None
+        # This will hold lists of up to 2 FASTQs by sample name
+        self.fastq_urls = collections.defaultdict(list)
+        # This will hold single GAM URLs by sample name
+        self.gam_urls = {}
         
-        # Then these will hold the IDs.
+        # Then these will hold the IDs, following the same shape.
         # For the FASTQs
-        self.fastq_ids = []
+        self.fastq_ids = collections.defaultdict(list)
         # And the GAM
-        self.gam_id = None
+        self.gam_ids = {}
                     
         
-    def add_fastq(self, fastq_url):
+    def add_sample_fastq(self, sample_name, fastq_url):
         """
-        Add the given FASTQ either as a single FASTQ or as a memebr of the PASTQ
-        pair.
-        """
-        
-        assert(len(self.fastq_urls) <= 2)
-        self.fastq_urls.append(fastq_url)
-        
-    def set_gam_url(self, gam_url):
-        """
-        Add the given GAM file to use instead of the FASTQs
+        Add the given FASTQ either as a single FASTQ or as a memebr of the FASTQ
+        pair for a sample.
         """
         
-        self.gam_url = gam_url
+        assert(len(self.fastq_urls[sample_name]) < 2)
+        self.fastq_urls[sample_name].append(fastq_url)
         
-    def set_sample_name(self, name):
+    def add_sample_gam(self, sample_name, gam_url):
         """
-        Set the sample name for the sample we call and evaluate SVs on.
-        """
-        
-        self.sample_name = name
-        
-    def get_fastq_ids(self):
-        """
-        Get the 0-2 FASTQ file IDs to use as a list.
-        """
-        
-        return self.fastq_ids
-        
-    def get_gam_id(self):
-        """
-        Get the GAM file ID to use, or None.
-        """
-        
-        return self.gam_id
-        
-    def get_sample_name(self):
-        """
-        Return the sample name we are using to evaluate SV calling.
+        Set the given GAM file to use instead of the FASTQs for the given
+        sample.
         
         """
         
-        return self.sample_name
+        self.gam_urls[sample_name] = gam_url
+        
+    def add_sample_name(self, name):
+        """
+        Add a sample that we will call and evaluate SVs on.
+        """
+        
+        self.sample_names.append(name)
+        
+    def get_fastq_ids(self, sample_name):
+        """
+        Get the 0-2 FASTQ file IDs to use for this sample as a list.
+        """
+        
+        return self.fastq_ids[sample_name]
+        
+    def get_gam_id(self, sample_name):
+        """
+        Get the GAM file ID to use for the given sample, or None.
+        """
+        
+        return self.gam_ids.get(sample_name, None)
+        
+    def get_sample_names(self):
+        """
+        Return the sample names we are using to evaluate SV calling.
+        
+        """
+        
+        return self.sample_names
         
     def bake(self, import_function):
         """
@@ -314,11 +317,12 @@ class SVRecallPlan(object):
         anything you want.
         """
         
-        # Grab the FASTQs
-        self.fastq_ids = [import_function(url) for url in self.fastq_urls]
+        for sample, urls in self.fastq_urls.iteritems(): 
+            # Grab the FASTQs
+            self.fastq_ids[sample] = [import_function(url) for url in urls]
         
-        if self.gam_url is not None:
+        for sample, url in self.gam_urls.iteritems():
             # Grab the GAM
-            self.gam_id = import_function(self.gam_url)
+            self.gam_ids[sample] = import_function(url)
         
     

@@ -74,6 +74,20 @@ class Directory(object):
         
         return self
         
+    def mount_all(self, dirs_by_prefix):
+        """
+        Mount all the directories in the given dict under their keys. Keys
+        without a trailing "/" will have it added.
+        
+        Can be chained.
+        
+        """
+        
+        for prefix, directory in dirs_by_prefix.iteritems():
+            self.mount(prefix, directory)
+        
+        return self
+        
     def get(self, file_name):
         """
         Return the Toil file ID associated with the given file name, or throw an

@@ -23,7 +23,10 @@ import subprocess
 import sys
 import collections
 import itertools
+import more_itertools
 import shutil
+import datetime
+import uuid
 
 import tsv
 import intervaltree
@@ -45,6 +48,7 @@ from .directory import Directory
 from .toilpromise import ToilPromise
 from .version import version
 from . import toilvgfacade
+from .manifest import Manifest
 
 # Get a submodule-global logger
 Logger = logging.getLogger("build")
@@ -126,17 +130,26 @@ def parse_args(args):
         
     # For SV calling and comparison against truth evaluaton
     sv_group = parser.add_argument_group("Structural variant evaluation")
-    sv_group.add_argument("--sv_sample_name", default=None,
+    sv_group.add_argument("--sv_sample_name", action="append", default=[],
         help="evaluate recall of this sample's SVs")
-    sv_group.add_argument("--sv_sample_fastq_url", action="append",
+    
+    # We need reads and we will get them form only one place
+    sv_read_source = sv_group.add_mutually_exclusive_group()
+    
+    # This list is going to hold FASTQs for multiple samples; all samples must
+    # be either paired-end or single-end so we can match them up.
+    sv_read_source.add_argument("--sv_sample_fastq_url", action="append",
         default=[],
-        help="FASTQ for one end of SV evaluation reads")
-    sv_group.add_argument("--sv_sample_gam_url", default=None,
+        help="FASTQ for one end of SV evaluation reads for one sample")
+    # Instead of FASTQs we can use pre-aligned GAMs. But we can only use one or
+    # the other.
+    sv_read_source.add_argument("--sv_sample_gam_url", action="append",
+        default=[],
         help="GAM for pre-aligned evaluation reads instead of FASTQs")
         
     # Output
-    parser.add_argument("out_dir",
-        help="directory to place the constructed graph parts in")
+    parser.add_argument("out_url",
+        help="file: or other Toil-supported URL to place results in")
     parser.add_argument("--dump_hgvm", default=None, type=os.path.abspath,
         help="dump the HGVM build to the given directory")
     
@@ -225,7 +238,7 @@ def create_eval_plan(control_url, xg_url, gcsa_url, sample_fq_urls,
         
     return eval_plan
     
-def create_recall_plan(sample_fq_urls, gam_url, sample_name):
+def create_recall_plan(sample_fastq_urls, gam_urls, sample_names):
     """
     Create an SVRecallPlan to evaluate structural variant recall for the given
     sample, using the given FASTQs or pre-aligned GAM.
@@ -233,17 +246,52 @@ def create_recall_plan(sample_fq_urls, gam_url, sample_name):
     
     recall_plan = SVRecallPlan()
     
-    for url in sample_fq_urls:
-        # Add all the FASTQs
-        recall_plan.add_fastq(url)
+    for sample_name in sample_names:
+        # Add a sample by this name
+        recall_plan.add_sample_name(sample_name)
         
-    if gam_url is not None:
-        # Add the GAM
-        recall_plan.set_gam_url(gam_url)
+    if len(sample_fastq_urls) == len(sample_names):
+        # Unpaired FASTQ (or no FASTQs)
         
-    if sample_name is not None:
-        # And the sample name
-        recall_plan.set_sample_name(sample_name)
+        for sample_name, sample_fastq_url in itertools.izip(sample_names,
+            sample_fastq_urls):
+            # Operate on one FASTQ per sample, and associate it with the sample
+            recall_plan.add_sample_fastq(sample_name, sample_fastq_url)
+        
+    elif len(sample_fastq_urls) == 2 * len(sample_names):
+        
+        for sample_name, (fastq1, fastq2) in itertools.izip(sample_names,
+            more_itertools.grouper(2, sample_fastq_urls)):
+            # For every sample name and the corresponding pair of FASTQs
+            
+            # Add both the FASTQs for the sample
+            recall_plan.add_sample_fastq(sample_name, fastq1)
+            recall_plan.add_sample_fastq(sample_name, fastq2)
+    
+    elif len(sample_fastq_urls) != 0:
+        # Not sure what the user thinks we're going to be able to do with this
+        # weird mismatched set of FASTQs.
+        raise RuntimeError("Cannot match up {} FASTQs with {} samples; "
+            "provide either all single-end or all paired FASTQs.".format(
+            len(sample_fastq_urls), len(sample_names)))
+    
+    if len(gam_urls) == len(sample_names):
+        # We have one GAM per sample instead of FASTQs
+        
+        for sample_name, gam_url in itertools.izip(sample_names, gam_urls):
+            # Operate on one GAM per sample, and associate it with the sample
+            recall_plan.add_sample_gam(sample_name, gam_url)
+        
+    elif len(gam_urls) != 0:
+        raise RuntimeError("Cannot match up {} GAMs with {} samples.".format(
+            len(gam_urls), len(sample_names)))
+            
+    if (len(gam_urls) == 0 and len(sample_fastq_urls) == 0 and
+        len(sample_names) > 0):
+        # We have no reads for our samples!
+        raise RuntimeError("Cannot do recall evaluation on any samples "
+            "without reads for them")
+        
         
     return recall_plan
     
@@ -344,7 +392,7 @@ def hal2vg_job(job, options, plan, hal_id):
     RealtimeLogger.info("Created VG graph {}".format(vg_id))
     return vg_id
         
-def merge_vgs_job(job, options, plan, vg_ids):
+def merge_vgs_job(job, options, vg_ids):
     """
     Merge the given VG graphs into one VG graph. Returns the ID of the merged VG
     graph.
@@ -388,6 +436,55 @@ def merge_vgs_job(job, options, plan, vg_ids):
             
         return vg_id
         
+def shift_vgs_job(job, options, vg_ids):
+    """
+    Given a list of VG graph IDs, reassign the node IDs in the vg graphs so that
+    they do not conflict. Returns a list of modified graph file IDs.
+    
+    """
+    
+    if len(vg_ids) < 2:
+        # Nothing to do because there are no possible conflicts with less than 2
+        # graphs
+        return vg_ids
+    
+    # First get all the ID pairs for all the graphs
+    id_promises = [ToilPromise.wrap(job.addChildJobFn(toilvgfacade.id_range_job,
+        options, vg)) for vg in vg_ids]
+        
+    # Then make jobs to shift all the graphs up. TODO: we could make this more
+    # parallel by starting to shift the early graphs before we know how big the
+    # late graphs are, with a sort of cascade.
+    def shift_all(job, ranges):
+        # This is an inline job to actually do all the shifting.
+        # This holds the shift job RVs
+        shift_results = []
+        # This holds the max used ID
+        used_ids = 0
+        
+        RealtimeLogger.info("Found ranges: {}".format(ranges))
+        
+        for (start, stop), vg_id in itertools.izip(ranges, vg_ids):
+            # For each graph and its ID range
+            
+            # How much should it shift? Note that if we start at the max used ID
+            # we need to shift by 1. Don't bother shifting down.
+            shift = max(used_ids - start + 1, 0)
+            
+            # Shift it up
+            shift_results.append(job.addChildJobFn(
+                toilvgfacade.id_increment_job, options, vg_id, shift).rv())
+            
+            # What's the last ID we end up using?
+            used_ids = stop + shift
+            
+        # Give back all the shifted graph IDs
+        return shift_results
+            
+        
+    # Return the result which is the list of shifted VG graph file IDs.
+    return ToilPromise.all(id_promises).then_job_fn(shift_all).unwrap_result()
+    
 def explode_vg_job(job, options, plan, vg_id):
     """
     Explode the given vg file into connected component subgraphs.
@@ -445,8 +542,9 @@ def explode_vg_job(job, options, plan, vg_id):
 def add_variants_to_parts_job(job, options, plan, paths_by_part):
     """
     Given a dict from vg file ID to the paths in that VG file, work out the VCF
-    files for each VG file and run jobs to add their variants. Return a list of
-    vg IDs for the graphs with variants added.
+    files for each VG file and run jobs to add their variants. Return a dict of
+    the same shape (vg graph ID to list of path names), but with the graph IDs
+    replaced by IDs fro graphs with the variants added.
     
     """
     
@@ -462,8 +560,11 @@ def add_variants_to_parts_job(job, options, plan, paths_by_part):
             
         vcfs_by_path[chromosome].append(vcf_id)
     
-    # Make a list of promises for updated vg graph file IDs
-    to_return = []
+    # Make a list of ToilPromises for updated vg graph file IDs
+    updated_graphs = []
+    
+    # And a list of the lists of path names that go with them
+    path_lists = []
     
     for vg_id, paths in paths_by_part.iteritems():
         # For each VG graph
@@ -477,9 +578,16 @@ def add_variants_to_parts_job(job, options, plan, paths_by_part):
         child = job.addChildJobFn(add_variants_job, options, plan, vg_id,
             vcfs, cores=2, memory="100G", disk="50G")
             
-        to_return.append(child.rv())
+        updated_graphs.append(ToilPromise.wrap(child))
         
-    return to_return
+        # And remember the paths in the graph
+        path_lists.append(paths)
+        
+    # Wait for all the graphs to be done, use their IDs as dict keys in a dict
+    # of path name lists, and return that.
+    return ToilPromise.all(updated_graphs
+        ).then(lambda graph_ids: dict(itertools.izip(graph_ids, path_lists))
+        ).unwrap_result()
         
         
 def hals_and_vgs_to_vg_job(job, options, plan, hal_ids, vg_ids):
@@ -509,7 +617,7 @@ def hals_and_vgs_to_vg_job(job, options, plan, hal_ids, vg_ids):
     RealtimeLogger.info("Converting {} HALs".format(len(hal_children)))
 
     # Then make another child to merge all the graphs
-    merge_child = job.addChildJobFn(merge_vgs_job, options, plan,
+    merge_child = job.addChildJobFn(merge_vgs_job, options,
         converted_vgs + vg_ids, cores=1, memory="100G", disk="20G")
     for child in hal_children:
         # Make sure the merger comes after all the HAL imports
@@ -589,11 +697,11 @@ def add_variants_job(job, options, plan, vg_id, vcf_ids):
     
     return new_vg_id
     
-def hgvm_package_job(job, options, plan, vg_id, xg_id, gcsa_pair):
+def hgvm_package_job(job, options, vg_id, xg_id, gcsa_pair, manifest_id):
     """
-    Given a VG file ID, and XG file ID, and a pair of GCSA and LCP file IDs,
-    produce a Directory with "hgvm.vg", "hgvm.xg", "hgvm.gcsa", and
-    "hgvm.gcsa.lcp" filled in.
+    Given a VG file ID, and XG file ID, a pair of GCSA and LCP file IDs, and a
+    "serialized manifest ID, produce a Directory with "hgvm.vg", "hgvm.xg",
+    ""hgvm.gcsa", hgvm.gcsa.lcp", and "hgvm.json" filled in.
     
     Runs as a Toil job so it will be able to unpack the pair.
     
@@ -605,27 +713,57 @@ def hgvm_package_job(job, options, plan, vg_id, xg_id, gcsa_pair):
     hgvm.add("hgvm.xg", xg_id)
     hgvm.add("hgvm.gcsa", gcsa_pair[0])
     hgvm.add("hgvm.gcsa.lcp", gcsa_pair[1])
+    hgvm.add("hgvm.json", manifest_id)
     
     return hgvm
     
-def graph_to_hgvm_job(job, options, vg_id):
+def graphs_to_hgvm_job(job, options, vg_ids, primary_paths=None):
     """
-    Convert just a vg graph into an HGVM directory with its indexes.
+    Convert a list of vg graphs into an HGVM directory with its indexes.
+    
+    Can take a list of primary path names (or "") for each vg graph, for use
+    with GCSA indexing. Those paths' nodes and edges are not pruned from the
+    index for their graphs.
     
     Used for preparing a graph for realignment.
     
+    Handles vg graph merging, and produces the hgvm manifest "hgvm.json".
     """
     
-    # TODO: drop this plan argument on lower-level functions
+    # Write the manifest, which will include the primary paths.
+    # We can add more facts here if we want.
+    # TODO: hashes or something?
+    manifest = Manifest({
+        "hgvm_manifest_version": "0.1",
+        "build_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "primary_paths": primary_paths,
+        "uuid": str(uuid.uuid4())
+    })
     
-    # Make the indexes
-    xg_job = job.addChildJobFn(toilvgfacade.xg_index_job, options, [vg_id])
-    gcsa_job = job.addChildJobFn(toilvgfacade.gcsa_index_job, options, [vg_id])
+    # Shift all the graphs so their ID ranges don't conflict
+    shift_job = job.addChildJobFn(shift_vgs_job, options, vg_ids)
     
-    # Make a packaging job
-    hgvm_job = xg_job.addFollowOnJobFn(hgvm_package_job, options, None, vg_id,
-        xg_job.rv(), gcsa_job.rv())
+    # Merge the graphs without changing IDs, by concatenation
+    merge_job = shift_job.addFollowOnJobFn(concat_job, options, vg_ids,
+        cores=1, memory="4G", disk="100G")
+    
+    # TODO: guess the primary path name and pass it through to the
+    # indexing.
+    
+    # Make the indexes using the individual graph files
+    xg_job = shift_job.addFollowOnJobFn(toilvgfacade.xg_index_job, options,
+        shift_job.rv())
+    # Forward the primary paths on to the GCSA indexer, if specified, so they
+    # can always be included.
+    gcsa_job = shift_job.addFollowOnJobFn(toilvgfacade.gcsa_index_job, options,
+        shift_job.rv(), primary_paths)
+    
+    # Make a packaging job to package along with the single concatenated graph
+    hgvm_job = xg_job.addFollowOnJobFn(hgvm_package_job, options,
+        merge_job.rv(), xg_job.rv(), gcsa_job.rv(),
+        manifest.save(job.fileStore))
     gcsa_job.addFollowOn(hgvm_job)
+    merge_job.addFollowOn(hgvm_job)
     
     # Return its return value
     return hgvm_job.rv()
@@ -633,7 +771,7 @@ def graph_to_hgvm_job(job, options, vg_id):
 def hgvm_build_job(job, options, plan):
     """
     Toil job for building the HGVM. Returns a Directory object holding
-    "hgvm.vg", "hgvm.xg", "hgvm.gcsa", and "hgvm.gcsa.lcp".
+    "hgvm.json", "hgvm.vg", "hgvm.xg", "hgvm.gcsa", and "hgvm.gcsa.lcp".
     
     """
     
@@ -660,58 +798,73 @@ def hgvm_build_job(job, options, plan):
         vg_job.rv(),
         cores=1, memory="100G", disk="100G")
         
-    # And add all the appropriate VCFs to each
+    # And add all the appropriate VCFs to each. Get a dict from updated graph
+    # file ID to the list of paths it contains.
     add_job = explode_job.addFollowOnJobFn(add_variants_to_parts_job, options,
         plan, explode_job.rv(),
         cores=1, memory="4G", disk="4G")
         
-    # And then merge those VCFs together
-    merge_job = add_job.addFollowOnJobFn(merge_vgs_job, options, plan,
-        add_job.rv(),
-        cores=1, memory="100G", disk="100G")
-    
-    # Add a followon to XG-index it
-    xg_job = merge_job.addFollowOnJobFn(toilvgfacade.xg_index_job, options,
-        [merge_job.rv()])
-    
-    # And another to GCSA-index it
-    gcsa_job = merge_job.addFollowOnJobFn(toilvgfacade.gcsa_index_job, options,
-        [merge_job.rv()])
-    
-    # And a job to package it all up, depending on the XG and GCSA.
-    directory_job = xg_job.addFollowOnJobFn(hgvm_package_job, options, plan,
-        merge_job.rv(), xg_job.rv(), gcsa_job.rv(),
-        cores=1, memory="2G", disk="1G")
-    gcsa_job.addFollowOn(directory_job)
+    # Unpack that dict into keys and shortest path names (or empty strings)
+    def reswizzle_path_names(paths_by_graph):
+        # Return a pair of lists of graph IDs and corresponding inferred primary
+        # path names. The primary path names are the shortest-named paths in
+        # each graph, or "" if the graph has no paths.
+        
+        graph_ids = []
+        primary_paths = []
+        
+        for graph_id, path_names in paths_by_graph.iteritems():
+            # Order all the graphs
+            graph_ids.append(graph_id)
+            if len(path_names) == 0:
+                # No primary path available for this chunk
+                primary_paths.append("")
+            else:
+                # Grab the shortest name, sorting next by string value
+                primary_paths.append(sorted(sorted(path_names), key=len)[0])
+                
+        RealtimeLogger.info("Guessed primary paths: {}".format(primary_paths))
+        
+        # Return the graphs and their guessed primary paths in the same order
+        return graph_ids, primary_paths
+    # Actually run that on the graph-id-to-name-list dict and get the promise
+    reswizzle_promise = ToilPromise.wrap(add_job).then(reswizzle_path_names)
+        
+    # And then a job to merge and index and package it, using the primary paths
+    # we just guessed for indexing. This job runs after the promise's job.
+    hgvm_job = reswizzle_promise.addFollowOnJobFn(
+        graphs_to_hgvm_job, options, reswizzle_promise.unwrap_result(0),
+        primary_paths=reswizzle_promise.unwrap_result(1),
+        cores=1, memory="4G", disk="4G")
     
     if options.dump_hgvm is not None:
-        # And another job to dump it
+        # Dump the hgvm directory from the filestore to local disk
         def dump(job, hgvm):
             hgvm.dump(job.fileStore, options.dump_hgvm)
-        ToilPromise.wrap(directory_job).then_job_fn(dump)
+        ToilPromise.wrap(hgvm_job).then_job_fn(dump)
     
     # Return the Directory with the packaged HGVM
-    return directory_job.rv()
+    return hgvm_job.rv()
     
-def merge_gam_job(job, options, gam_ids):
+def concat_job(job, options, file_ids):
     """
-    Merge zero or more GAM files into one by concatenation. Returns the merged
-    file ID.
+    Merge zero or more VG protobuf files into one by concatenation. Returns the
+    merged file ID.
     
     """
     
-    with job.fileStore.writeGlobalFileStream() as (gam_handle, gam_id):
+    with job.fileStore.writeGlobalFileStream() as (cat_handle, cat_id):
         # Make one merged file
         
-        for part_id in gam_ids:
-            # For each part GAM
+        for part_id in file_ids:
+            # For each part file
             with job.fileStore.readGlobalFileStream(part_id) as part_handle:
                 # Open it
                 
-                # And stream it to the combined GAM
-                shutil.copyfileobj(part_handle, gam_handle)
+                # And stream it to the combined file
+                shutil.copyfileobj(part_handle, cat_handle)
     
-    return gam_id
+    return cat_id
     
 def split_records_job(job, options, file_ids, lines_per_record=4,
     records_per_part=100000):
@@ -838,7 +991,7 @@ def align_to_hgvm_chunked_job(job, options, hgvm, fastqs=[],
     # After splitting, do all the alignments, then merge the GAMs and return
     # that
     return ToilPromise.wrap(split_job).then_job_fn(do_alignments).then_job_fn(
-        merge_gam_job, options).unwrap_result()
+        concat_job, options).unwrap_result()
     
     
     
@@ -916,6 +1069,10 @@ def call_on_hgvm_job(job, options, hgvm, pileup_id, vcf=False):
     the VCF data as "calls.vcf", and the augmented graph as "augmented.vg".
     
     """
+
+    # Load the manifest, which lists the primary paths, which we want to know
+    # for calling
+    manifest = Manifest.load(job.fileStore, hgvm.get("hgvm.json"))
     
     # Download just the vg
     vg_filename = job.fileStore.readGlobalFile(hgvm.get("hgvm.vg"))
@@ -926,15 +1083,17 @@ def call_on_hgvm_job(job, options, hgvm, pileup_id, vcf=False):
     # Pick an augmented graph filename
     augmented_filename = job.fileStore.getLocalTempDir() + "/augmented.vg"
     
-    # TODO: don't just guess a ref path. Make call not require one (or allow
-    # many).
-    ref_path = options.vcf_contig[0]
-    if options.add_chr:
-        ref_path = "chr" + ref_path
+    # Make arguments to annotate all the reference paths
+    ref_args = []
+    for ref_path in manifest.get("primary_paths", []):
+        # For every primary path we have defined, tell the caller to use it as a
+        # reference path.
+        ref_args.append("--ref")
+        ref_args.append(ref_path)
     
     # Set up the VG run
-    vg_args = ["vg", "call", "--aug-graph", augmented_filename,
-        "--ref", ref_path, vg_filename, pileup_filename]
+    vg_args = ["vg", "call", "--aug-graph", augmented_filename, vg_filename,
+        pileup_filename] + ref_args
         
     if not vcf:
         # Don'tmake a VCF
@@ -1194,7 +1353,7 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
             # Then do the calling
             call_job = pileup_job.addFollowOnJobFn(call_on_hgvm_job, options,
                 hgvm, pileup_job.rv(),
-                cores=1, memory="50G", disk="50G")
+                cores=1, memory="100G", disk="50G")
             # And a promise for the call results directory.
             call_promise = ToilPromise.wrap(call_job)
             
@@ -1216,7 +1375,7 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
                 
                 # First reindex and package the sample itself as an HGVM
                 package_job = subset_job.addFollowOnJobFn(
-                    graph_to_hgvm_job, options, subset_job.rv())
+                    graphs_to_hgvm_job, options, [subset_job.rv()])
                 
                 # Then realign and grab the realigned GAM
                 realign_job = package_job.addFollowOnJobFn(
@@ -1408,72 +1567,89 @@ def hgvm_sv_recall_job(job, options, plan, recall_plan, hgvm):
     
     # Make sure we have everything we would need to actually do this job
     
-    if recall_plan.get_gam_id() is not None:
-        # We can just use this GAM
-        align_promise = ToilPromise.resolve(job, Directory(
-            {"aligned.gam": recall_plan.get_gam_id()}))
-        # Do the pileup as a child
-        pileup_job = job.addChildJobFn(pileup_on_hgvm_job, options,
-            hgvm, recall_plan.get_gam_id(),
-            cores=1, memory="50G", disk="100G")
-    else:
-        # We have to actually align some FASTQs    
-        fastqs=recall_plan.get_fastq_ids()
-        if len(fastqs) == 0 or recall_plan.get_sample_name() is None:
-            # Nothing to do!
-            return Directory()
-        
-        # Align the reads
-        align_job = job.addChildJobFn(align_to_hgvm_chunked_job, options,
-            hgvm, fastqs=fastqs,
-            cores=16, memory="50G", disk="100G")
-        # Put it in a Directory in a promise
-        align_promise = ToilPromise.wrap(align_job).then(
-            lambda id: Directory({"aligned.gam": id}))
+    if len(recall_plan.get_sample_names()) == 0:
+        # Don't do anything!
+        return Directory()
+    
+    # Otherwise, we fill this with promises for directories, one per sample
+    sample_promises = []
+    
+    for sample_name in recall_plan.get_sample_names():
+        # For each sample we want to compute recall for
+    
+        if recall_plan.get_gam_id(sample_name) is not None:
+            # We can just use this GAM
+            align_promise = ToilPromise.resolve(job, Directory(
+                {"aligned.gam": recall_plan.get_gam_id(sample_name)}))
+            # Do the pileup as a child
+            pileup_job = job.addChildJobFn(pileup_on_hgvm_job, options,
+                hgvm, recall_plan.get_gam_id(sample_name),
+                cores=1, memory="50G", disk="100G")
+        else:
+            # We have to actually align some FASTQs    
+            fastqs=recall_plan.get_fastq_ids(sample_name)
+            if len(fastqs) == 0:
+                # We have a sample with no FASTQ and no GAM
+                raise RuntimeError("No reads available for recall evaluation "
+                    "on {}".format(sample_name))
             
-        # Then do the pileup as a follow-on
-        pileup_job = align_job.addFollowOnJobFn(pileup_on_hgvm_job, options,
-            hgvm, align_job.rv(),
-            cores=1, memory="50G", disk="100G")
-    # Put it in a Directory in a promise
-    pileup_promise = ToilPromise.wrap(pileup_job).then(
-        lambda id: Directory({"pileup.vgpu": id}))
+            # Align the reads
+            align_job = job.addChildJobFn(align_to_hgvm_chunked_job, options,
+                hgvm, fastqs=fastqs,
+                cores=16, memory="50G", disk="100G")
+            # Put it in a Directory in a promise
+            align_promise = ToilPromise.wrap(align_job).then(
+                lambda id: Directory({"aligned.gam": id}))
+                
+            # Then do the pileup as a follow-on
+            pileup_job = align_job.addFollowOnJobFn(pileup_on_hgvm_job, options,
+                hgvm, align_job.rv(),
+                cores=1, memory="50G", disk="100G")
+        # Put it in a Directory in a promise
+        pileup_promise = ToilPromise.wrap(pileup_job).then(
+            lambda id: Directory({"pileup.vgpu": id}))
+        
+        # Then do the calling
+        call_job = pileup_job.addFollowOnJobFn(call_on_hgvm_job, options,
+            hgvm, pileup_job.rv(), vcf=True,
+            cores=1, memory="100G", disk="50G")
+        # And a promise for the call results directory.
+        call_promise = ToilPromise.wrap(call_job)
+        
+        # Collect the expected variants from all the input VCFs for the
+        # chromosomes we did
+        truth_vcfs = []
+        for chromosome in plan.for_each_chromosome():
+            # TODO: limit to just the contigs we are actually doing, somehow...
+            for vcf_id in plan.get_vcf_ids(chromosome):
+                # Aggregate into a list of VCFs
+                truth_vcfs.append(vcf_id)
+        
+        # Compare the expected variants to the observed variants and compute the
+        # fraction recalled
+        compare_job = call_job.addFollowOnJobFn(measure_sv_recall_job, options,
+            call_job.rv(), truth_vcfs, sample_name,
+            cores=1, memory="8G", disk="100G")
+        # And add a promise for its results Directory
+        compare_promise = ToilPromise.wrap(compare_job)
     
-    # Then do the calling
-    call_job = pileup_job.addFollowOnJobFn(call_on_hgvm_job, options,
-        hgvm, pileup_job.rv(), vcf=True,
-        cores=1, memory="50G", disk="50G")
-    # And a promise for the call results directory.
-    call_promise = ToilPromise.wrap(call_job)
-    
-    # Collect the expected variants from all the input VCFs for the chromosomes
-    # we did
-    truth_vcfs = []
-    for chromosome in plan.for_each_chromosome():
-        # TODO: limit to just the contigs we are actually doing, somehow...
-        for vcf_id in plan.get_vcf_ids(chromosome):
-            # Aggregate into a list of VCFs
-            truth_vcfs.append(vcf_id)
-    
-    # Compare the expected variants to the observed variants and compute the
-    # fraction recalled
-    compare_job = call_job.addFollowOnJobFn(measure_sv_recall_job, options,
-        call_job.rv(), truth_vcfs, recall_plan.get_sample_name(),
-        cores=1, memory="8G", disk="100G")
-    # And add a promise for its results Directory
-    compare_promise = ToilPromise.wrap(compare_job)
-    
-    # Return all that as a Directory
-    return ToilPromise.all([align_promise, pileup_promise, call_promise,
-        compare_promise]).then(
-        lambda dirs: dirs[0].merge(*dirs[1:])).unwrap_result()
+        # Promise all that in a Directory
+        sample_promises.append(ToilPromise.all([align_promise, pileup_promise,
+            call_promise, compare_promise]).then(
+            lambda dirs: dirs[0].merge(*dirs[1:])))
+         
+    # Mount all the per-sample directories under their sample names   
+    return ToilPromise.all(sample_promises
+        ).then(lambda dirs: Directory().mount_all(
+        dict(itertools.izip(recall_plan.get_sample_names(), dirs)))
+        ).unwrap_result()
     
 def main_job(job, options, plan, eval_plan, recall_plan):
     """
     Root job of the Toil workflow. Build and then evaluate an HGVM.
     
-    Returns a tuple of the packaged HGVM Directory, the realignment evaluation
-    results Directory, and the SV recall results Directory.
+    Returns a fully-structured output Directory. All the master has to do is
+    export it.
     
     """
     
@@ -1503,13 +1679,12 @@ def main_job(job, options, plan, eval_plan, recall_plan):
         recall_plan, build_job.rv(),
         cores=1, memory="2G", disk="1G")
         
-    # At this point we have a problem: if the export code fails (maybe an upload
-    # timeout or something) we lose all our work. TODO: dump some kind of cookie
-    # to console that can be used to fetch everything out of the filestore
-    # (which must still be around)
-        
-    # Return the pair of created Directories
-    return (build_job.rv(), eval_job.rv(), sv_eval_job.rv())
+    # Stick all those directories in a folder structure and return that
+    return ToilPromise.all({
+        "hgvm": ToilPromise.wrap(build_job),
+        "eval/realignment": ToilPromise.wrap(eval_job),
+        "eval/sv": ToilPromise.wrap(sv_eval_job)
+    }).then(lambda dirs: Directory().mount_all(dirs)).unwrap_result()
     
 def main(args):
     """
@@ -1534,8 +1709,7 @@ def main(args):
         
         if toil_instance.options.restart:
             # We're re-running. Grab the root job return value from restart
-            hgvm_directory, eval_directory, recall_directory = \
-                toil_instance.restart()
+            directory = toil_instance.restart()
         else:
             # Run from the top
         
@@ -1564,19 +1738,13 @@ def main(args):
                 recall_plan,
                 cores=1, memory="1G", disk="1G")
             
-            # Run the root job and get the packaged HGVM and its evaluations as
-            # Directories.
-            hgvm_directory, eval_directory, recall_directory = \
-                toil_instance.start(root_job)
+            # Run the root job and get the final output directory
+            directory = toil_instance.start(root_job)
         
-        # Stick the evaluations in the HGVM directory for now
-        hgvm_directory.mount("eval", eval_directory)
-        hgvm_directory.mount("recall", recall_directory)
-            
-        # Export the HGVM
-        hgvm_directory.export_to(
+        # Export the results
+        directory.export_to(
             lambda id, url: toil_instance.exportFile(id, url),
-            "file:{}".format(options.out_dir))
+            options.out_url)
         
     print("Toil workflow complete")
     return 0
