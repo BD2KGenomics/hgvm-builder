@@ -97,6 +97,21 @@ def extract_job(job, options, sam_url):
     options.drunner.call(job, [["samtools", "sort", "-n", "-o",
         sorted_bam, "-T", temp_prefix, sam_url]])
         
+    # Save to file store
+    bam_id = job.fileStore.writeGlobalFile(sorted_bam)
+    
+    # Convert and return FASTQs
+    return job.addChildJobFn(convert_job, options, sam_url, bam_id,
+        cores=4, memory="16G", disk="1000G")
+        
+def convert_job(job, options, sam_url, bam_id):
+    """
+    Subset and convert BAM to FASTQ pair. Returns FASTQ IDs.
+    """
+    
+    # Read the BAM back
+    sorted_bam = job.fileStore.readGlobalFile(bam_id)
+        
     RealtimeLogger.info("Subset {} to SAM".format(sam_url))
         
     # Then stream to SAM and select just the reads we want
