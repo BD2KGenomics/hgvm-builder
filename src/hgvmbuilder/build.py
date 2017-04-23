@@ -8,7 +8,8 @@ unlocalized/poorly localized scaffonds) including the variation from the VCF.
 
 Parallelizes using the Toil system.
 
-Requires the "vg" binary to be available on the PATH on all nodes.
+Requires the "vg", "samtools", and "hal2vg" binaries to be available on the PATH
+on all nodes, or to use Docker or Singularity.
 
 """
 
