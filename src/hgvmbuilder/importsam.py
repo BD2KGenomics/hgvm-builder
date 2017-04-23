@@ -102,7 +102,7 @@ def extract_job(job, options, sam_url):
     
     # Convert and return FASTQs
     return job.addChildJobFn(convert_job, options, sam_url, bam_id,
-        cores=4, memory="16G", disk="1000G")
+        cores=4, memory="16G", disk="1000G").rv()
         
 def convert_job(job, options, sam_url, bam_id):
     """
