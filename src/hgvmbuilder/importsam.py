@@ -87,11 +87,15 @@ def extract_job(job, options, sam_url):
     # Let's just download the whole bam
     sorted_bam = job.fileStore.getLocalTempDir() + "/sorted.bam"
     
+    # We need a prefix for temp files
+    temp_prefix = sorted_bam + ".part"
+    
     RealtimeLogger.info("Sort {} to BAM".format(sam_url))
     
-    # Sort reads by name to a BAM file
+    # Sort reads by name to a BAM file. If we don't give a temp file prefix it
+    # tries to write the temp files back to the FTP.
     options.drunner.call(job, [["samtools", "sort", "-n", "-o",
-        sorted_bam, sam_url]])
+        sorted_bam, "-T", temp_prefix, sam_url]])
         
     RealtimeLogger.info("Subset {} to SAM".format(sam_url))
         
