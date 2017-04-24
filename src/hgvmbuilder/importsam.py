@@ -168,6 +168,8 @@ def main_job(job, options, sam_urls):
     """
     
     RealtimeLogger.info("Main job starting")
+    RealtimeLogger.info("Temp directory location: {}".format(
+        job.fileStore.getLocalTempDir()))
     
     # Make sure we can use samtools
     options.drunner.call(job, [["samtools", "--version"]])
