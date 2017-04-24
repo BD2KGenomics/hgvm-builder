@@ -1070,18 +1070,31 @@ def call_on_hgvm_job(job, options, hgvm, pileup_id, vcf=False):
     
     """
 
-    # Load the manifest, which lists the primary paths, which we want to know
-    # for calling
-    manifest = Manifest.load(job.fileStore, hgvm.get("hgvm.json"))
-    
-    # Download just the vg
-    vg_filename = job.fileStore.readGlobalFile(hgvm.get("hgvm.vg"))
-    
+    # Define a work_dir so Docker can work
+    work_dir = job.fileStore.getLocalTempDir()
+
+    if hgvm.has_file("hgvm.json"):
+        # Load the manifest, which lists the primary paths, which we want to
+        # know for calling
+        manifest = Manifest.load(job.fileStore, hgvm.get("hgvm.json"))
+    else:
+        # Make a fake Manifest with no primary paths. vg call had better be able
+        # to guess them itself.
+        RealtimeLogger.warn("Creating fake manifest with no primary paths!")
+        manifest = Manifest()
+        
+    # Download the vg
+    vg_filename = "hgvm.vg"
+    job.fileStore.readGlobalFile(hgvm.get("hgvm.vg"),
+        os.path.join(work_dir, vg_filename))
+        
     # Download the pileup
-    pileup_filename = job.fileStore.readGlobalFile(pileup_id)
+    pileup_filename = "pileup.vgpu"
+    job.fileStore.readGlobalFile(pileup_id,
+        os.path.join(work_dir, pileup_filename))
     
     # Pick an augmented graph filename
-    augmented_filename = job.fileStore.getLocalTempDir() + "/augmented.vg"
+    augmented_filename = "augmented.vg"
     
     # Make arguments to annotate all the reference paths
     ref_args = []
@@ -1103,10 +1116,12 @@ def call_on_hgvm_job(job, options, hgvm, pileup_id, vcf=False):
     
     with job.fileStore.writeGlobalFileStream() as (output_handle, output_id):
         # Call and stream the Locus or VCF data to the file store
-        options.drunner.call(job, [vg_args], outfile=output_handle)
+        options.drunner.call(job, [vg_args], outfile=output_handle,
+            work_dir=work_dir)
         
     # Upload the augmented graph
-    augmented_id = job.fileStore.writeGlobalFile(augmented_filename)
+    augmented_id = job.fileStore.writeGlobalFile(
+        os.path.join(work_dir, augmented_filename))
     
     # Put the files in a Directory
     results = Directory()

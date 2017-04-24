@@ -166,6 +166,8 @@ class EvaluationPlan(object):
             "hgvm.gcsa.lcp": self.get_lcp_id(vg_id)
         })
         
+        # TODO: Manifest!
+        
         return package
         
     def bake(self, import_function):
