@@ -172,46 +172,59 @@ class Directory(object):
         return self
         
     @staticmethod
-    def import_from(import_function, base_url):
+    def import_from(import_function, base_url, file_names=None):
         """
         Import the files and directories under the given file URL into Toil
         using the given URL-to-file-ID uploading function, and return a
         Directory representing them.
         
+        For non-file URLs, file_names must be specified. Every file name in the
+        collection will be imported.
+        
+        For file URLs, the directory is always walked and imported in its
+        entirety.
+        
+        TODO: accept manifests that list files
+        
         """
         
         Logger.info("Import directory from {}".format(base_url))
+        
+        # Make an empty Directory
+        directory = Directory()
         
         # We need to parse the URL so we can do special handling of file URLs
         parsing = urlparse.urlparse(base_url)
         
         if parsing.scheme == "file":
             # Work out what directory to look in
-            base_path = parsing.path
-        else:
-            raise RuntimeError("Cannot recursively traverse non-file URLs")
-        
-        # Make the path absolute
-        base_path = os.path.abspath(base_path)
-        
-        # Make an empty Directory
-        directory = Directory()
-    
-        for dir_path, dir_names, file_names in os.walk(base_path):
-            # For every directory we find
+            base_path = os.path.abspath(parsing.path)
+            
+            for dir_path, dir_names, file_names in os.walk(base_path):
+                # For every directory we find
+                for file_name in file_names:
+                    # For every file in that directory
+                    
+                    # Get its full absolute path
+                    full_path = os.path.join(base_path, dir_path, file_name)
+                    
+                    # Import it
+                    file_id = import_function("file:" + full_path)
+                    
+                    # Register it in the directory we're building, using the path
+                    # relative from the path for the base directory.
+                    directory.add(os.path.relpath(os.path.join(dir_path,
+                        file_name), base_path), file_id)
+            
+        elif file_names is not None:
+            # Just try all the file names
+            
             for file_name in file_names:
-                # For every file in that directory
-                
-                # Get its full absolute path
-                full_path = os.path.join(base_path, dir_path, file_name)
-                
-                # Import it
-                file_id = import_function("file:" + full_path)
-                
-                # Register it in the directory we're building, using the path
-                # relative from the path for the base directory.
-                directory.add(os.path.relpath(os.path.join(dir_path, file_name),
-                    base_path), file_id)
+                # Import every file that was named
+                directory.add(file_name,
+                    import_function(base_url + "/" + file_name))
+        else:
+            raise RuntimeError("Need file name hints for non-file URLs!")
         
         # Return the completed directory
         return directory

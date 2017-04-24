@@ -357,9 +357,11 @@ class ReferencePlan(object):
             self.base_vg_ids.append(imported_id)
             
         if self.hgvm_url:
-            # Just import this whole directory
+            # Just import this whole directory.
+            # If we can't iterate it, grab these specific files.
             self.hgvm_directory = Directory.import_from(import_function,
-                self.hgvm_url)
+                self.hgvm_url, file_names = ["hgvm.json", "hgvm.vg", "hgvm.xg",
+                    "hgvm.gcsa", "hgvm.gcsa.lcp"])
     
     def set_chromosome_name(self, accession, name):
         """
