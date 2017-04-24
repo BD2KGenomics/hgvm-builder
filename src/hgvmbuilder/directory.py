@@ -99,6 +99,15 @@ class Directory(object):
         else:
             raise Exception("File {} not found.".format(file_name))
             
+    def has_file(self, file_name):
+        """
+        Returns true if we have a file with the given name, and false otherwise.
+        
+        """
+        
+        return self.ids.has_key(file_name)
+        
+            
     def for_each_file(self, prefix=""):
         """
         Iterate over name, ID pairs in the Directory that start with the given
