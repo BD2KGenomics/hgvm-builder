@@ -296,7 +296,7 @@ def create_recall_plan(sample_fastq_urls, gam_urls, sample_names):
     return recall_plan
     
    
-def prepare_fasta(job, fasta_id):
+def prepare_fasta(job, options, fasta_id):
     """
     Given a job and a FASTA ID in its file store, download, decompress, scan,
     index, and re-upload the FASTA.
@@ -312,15 +312,18 @@ def prepare_fasta(job, fasta_id):
     
     RealtimeLogger.info("Preparing FASTA {}".format(fasta_id))
     
+    # Make a work_dir we can mount in Docker
+    work_dir = job.fileStore.getLocalTempDir()
+    
     # For each FASTA, drop it on disk somewhere
-    filename = os.path.join(job.fileStore.getLocalTempDir(), "fasta.fa")
+    filename = os.path.join(work_dir, "fasta.fa")
     with open(filename, "w") as out_handle:
         with job.fileStore.readGlobalFileStream(fasta_id) as in_handle:
             # Read from the file store, uncompress if needed, and write to disk.
             shutil.copyfileobj(TransparentUnzip(in_handle), out_handle)
          
     # Now index it
-    subprocess.check_call(["samtools", "faidx", filename])   
+    options.drunner.call([["samtools", "faidx", "fasta.fa"]], work_dir=work_dir)   
     
     with open(filename + ".fai") as index_file:
         for line in index_file:
@@ -361,16 +364,20 @@ def hal2vg_job(job, options, plan, hal_id):
     # We need to want a HAL genome to use a HAL
     assert(len(options.hal_genome) > 0)
     
+    # Define a work_dir for Docker purposes.
+    work_dir = job.fileStore.getLocalTempDir()
+    
     # Download the HAL
-    hal_file = job.fileStore.readGlobalFile(hal_id)
+    hal_file = "halfile.hal"
+    job.fileStore.readGlobalFile(hal_id, os.path.join(work_dir, hal_file))
     
     RealtimeLogger.info("Converting HAL {}".format(hal_id))
     
     # Find all the sequences we want
     sequences = []
     
-    # Convert into a local file
-    vg_filename = os.path.join(job.fileStore.getLocalTempDir(), "from_hal.vg")
+    # Convert into a local file.
+    vg_filename = "from_hal.vg"
     
     # Pull out only the requested genomes, and sort so IDs start at 1 and are
     # nice.
@@ -381,13 +388,15 @@ def hal2vg_job(job, options, plan, hal_id):
         "--refGenome", options.hal_genome[0],
         "--noAncestors"],
         ["vg", "mod", "-", "--chop", "100"],
-        ["vg", "ids", "-s", "-"]], outfile=open(vg_filename, "w"))
+        ["vg", "ids", "-s", "-"]], outfile=open(
+        os.path.join(work_dir, vg_filename), "w"), work_dir=work_dir)
         
     # Validate the resulting graph
-    options.drunner.call(job, [["vg", "validate", vg_filename]])
+    options.drunner.call(job, [["vg", "validate", vg_filename]],
+        work_dir=work_dir)
     
     # Upload it
-    vg_id = job.fileStore.writeGlobalFile(vg_filename)
+    vg_id = job.fileStore.writeGlobalFile(os.path.join(work_dir, vg_filename))
         
     RealtimeLogger.info("Created VG graph {}".format(vg_id))
     return vg_id
@@ -409,30 +418,38 @@ def merge_vgs_job(job, options, vg_ids):
     else:
         # Actually need to merge.
         
-        # Grab all the graphs. Don't cache because we'll need to modify their
-        # IDs in place.
-        vg_names = [job.fileStore.readGlobalFile(vg_id, cache=False)
-            for vg_id in vg_ids]
+        work_dir = job.fileStore.getLocalTempDir()
+        
+        # Make up unique names for all the graphs we need
+        vg_names = ["graph{}.vg".format(i) for i in xrange(len(vg_ids))]
+        
+        for name, file_id in itertools.izip(vg_names, vg_ids):
+            # Grab all the graphs. Don't cache because we'll need to modify
+            # their IDs in place.
+            job.fileStore.readGlobalFile(file_id,
+                userPath=os.path.join(work_dir, name), cache=False)
+
         # Make a new filename for the merged graph
-        merged_name = os.path.join(job.fileStore.getLocalTempDir(), "merged.vg")
+        merged_name = "merged.vg"
         
         for vg_filename in vg_names:
             # Make sure all the vg files are writeable
             # Cache=False might be supposed to do it but we have to make sure.
-            os.chmod(vg_filename, 0644)
+            os.chmod(os.path.join(work_dir, vg_filename), 0644)
         
         # Set up a command to merge all the graphs and put them in a shared ID
         # space
         vg_args = ["vg", "ids", "-j"] + vg_names
         
         # It modifies the files in place
-        options.drunner.call(job, [vg_args])
+        options.drunner.call(job, [vg_args], work_dir=work_dir)
         
         cat_args = ["cat"] + vg_names
         
         with job.fileStore.writeGlobalFileStream() as (vg_handle, vg_id):
             # Make a merged vg with cat
-            options.drunner.call(job, [cat_args], outfile=vg_handle)
+            options.drunner.call(job, [cat_args], outfile=vg_handle,
+                work_dir=work_dir)
             
         return vg_id
         
@@ -440,6 +457,8 @@ def shift_vgs_job(job, options, vg_ids):
     """
     Given a list of VG graph IDs, reassign the node IDs in the vg graphs so that
     they do not conflict. Returns a list of modified graph file IDs.
+    
+    TODO: use vg ids -j which is indeed in place.
     
     """
     
@@ -495,28 +514,34 @@ def explode_vg_job(job, options, plan, vg_id):
     
     RealtimeLogger.info("Exploding graph {}".format(vg_id))
     
+    # Define a work_dir for Docker
+    work_dir = job.fileStore.getLocalTempDir()
+    
     # Download the VG file
-    vg_name = job.fileStore.readGlobalFile(vg_id)
+    vg_name = "graph.vg"
+    job.fileStore.readGlobalFile(vg_id, os.path.join(work_dir, vg_name))
     
     # Set a directory for parts
-    part_dir = job.fileStore.getLocalTempDir() + "/parts"
+    part_dir = "parts"
     
     # Reserve a report file
-    report_filename = job.fileStore.getLocalTempDir() + "/report.tsv"
+    report_filename = "report.tsv"
     
     # Set up args for the VG explode call
     vg_args = ["vg", "explode", vg_name, part_dir]
     
     # Run the call and capture the output
-    report = options.drunner.call(job, [vg_args],
-        outfile=open(report_filename, "w"))
+    options.drunner.call(job, [vg_args],
+        outfile=open(os.path.join(work_dir, report_filename), "w"),
+        work_dir=work_dir)
     
-    RealtimeLogger.info("Exploded and put report in {}".format(report_filename))
+    RealtimeLogger.info("Exploded and put report in {}".format(
+        os.path.join(work_dir, report_filename)))
     
     # We'll populate this with the paths that live in each part
     paths_by_part = {}
     
-    for line in open(report_filename):
+    for line in open(os.path.join(work_dir, report_filename)):
         if line == "":
             # Skip blank lines
             continue
@@ -524,16 +549,19 @@ def explode_vg_job(job, options, plan, vg_id):
         parts = line.strip().split("\t")
         
         # Validate the part
-        options.drunner.call(job, [["vg", "validate", parts[0]]])
+        options.drunner.call(job, [["vg", "validate", parts[0]]],
+            work_dir=work_dir)
         
         # Save the file (first entry) to the filestore
-        part_id = job.fileStore.writeGlobalFile(parts[0])
+        part_id = job.fileStore.writeGlobalFile(
+            os.path.join(work_dir, parts[0]))
         
         # Remember that all of its paths belong to it. Make sure to trim tabs
         # and newlines.
         paths_by_part[part_id] = parts[1:]
         
-        RealtimeLogger.info("Placed {} paths in part {}".format(len(parts) - 1, parts[0]))
+        RealtimeLogger.info("Placed {} paths in part {}".format(
+            len(parts) - 1, parts[0]))
         
     assert len(paths_by_part) > 0
         
@@ -636,6 +664,9 @@ def add_variants_job(job, options, plan, vg_id, vcf_ids):
         # Just spit back the graph unchanged
         return vg_id
     
+    # Define a work directory to mount in Dockers
+    work_dir = job.fileStore.getLocalTempDir()
+    
     # Download all the VCFs
     vcf_filenames = []
     for i, vcf_id in enumerate(vcf_ids):
@@ -645,34 +676,36 @@ def add_variants_job(job, options, plan, vg_id, vcf_ids):
             # This VCF is indexed, so it must be gzipped
             
             # Download the VCF under a .gz name
-            vcf_filename = os.path.join(job.fileStore.getLocalTempDir(),
-            "vcf{}.vcf.gz".format(i))
-            job.fileStore.readGlobalFile(vcf_id, vcf_filename)
+            vcf_filename = "vcf{}.vcf.gz".format(i)
+            job.fileStore.readGlobalFile(vcf_id,
+                os.path.join(work_dir, vcf_filename))
             
             # Download its index next to it
             job.fileStore.readGlobalFile(plan.get_index_id(vcf_id),
-                vcf_filename + ".tbi")
+                os.path.join(work_dir, vcf_filename + ".tbi"))
             
             # Make sure the index is newer than the VCF
-            os.utime(vcf_filename + ".tbi", None)
+            os.utime(os.path.join(work_dir, vcf_filename + ".tbi"), None)
             
         else:
             # If it's not indexed, assume it's not compressed either.
-            vcf_filename = os.path.join(job.fileStore.getLocalTempDir(),
-            "vcf{}.vcf".format(i))
-            job.fileStore.readGlobalFile(vcf_id, vcf_filename)
+            vcf_filename = "vcf{}.vcf".format(i)
+            job.fileStore.readGlobalFile(vcf_id,
+                os.path.join(work_dir, vcf_filename))
             
         # Save the filename
         vcf_filenames.append(vcf_filename)
         
         RealtimeLogger.info("Downloaded VCF {} as {}".format(vcf_id,
-            vcf_filename))
+            os.path.join(work_dir, vcf_filename)))
     
     # Download the input graph
-    vg_filename = job.fileStore.readGlobalFile(vg_id)
+    vg_filename = "graph.vg"
+    job.fileStore.readGlobalFile(vg_id, os.path.join(work_dir, vg_filename))
     
     # Validate it
-    options.drunner.call(job, [["vg", "validate", vg_filename]])
+    options.drunner.call(job, [["vg", "validate", vg_filename]],
+        work_dir=work_dir)
     
     # Set up a command to add the VCFs to the graph
     vg_args = ["vg", "add", vg_filename]
@@ -693,7 +726,8 @@ def add_variants_job(job, options, plan, vg_id, vcf_ids):
     
     with job.fileStore.writeGlobalFileStream() as (vg_handle, new_vg_id):
         # Stream new graph to the filestore
-        options.drunner.call(job, [vg_args], outfile=vg_handle)
+        options.drunner.call(job, [vg_args], outfile=vg_handle,
+            work_dir=work_dir)
     
     return new_vg_id
     
@@ -888,13 +922,19 @@ def split_records_job(job, options, file_ids, lines_per_record=4,
         # Super easy to split no files.
         return []
     
+    # Define a work_dir to work in for Docker
+    work_dir = job.fileStore.getLocalTempDir()
+    
     # Download the files
-    file_names = [job.fileStore.readGlobalFile(x) for x in file_ids]
+    file_names = ["file{}".format(i) for i in xrange(len(file_ids))]
+    for file_id, file_name in itertools.izip(file_ids, file_names):
+        # Each one goes undar a name we assigned in work_dir
+        job.fileStore.readGlobalFile(file_id, os.path.join(work_dir, file_name))
     
     # Measure the first file
     line_count = int(options.drunner.call(job, [["wc", "-l", file_names[0]],
         ["cut", "-f", "1", "-d", " "]],
-        check_output = True))
+        check_output=True, work_dir=work_dir))
     
     # There may not be any partial records
     assert(line_count % lines_per_record == 0)
@@ -907,21 +947,23 @@ def split_records_job(job, options, file_ids, lines_per_record=4,
     RealtimeLogger.info("Splitting {} into {} parts of {} lines each...".format(
         file_ids, part_count, lines_per_record * records_per_part))
     
-    # This holds a list for each chunk of all the files' chunks, as file IDs
+    # This holds a list for each chunk number of all the corresponding chunks
+    # from all files, as file IDs
     part_lists = []
     
     # This holds the file IDs for the chunk currently being worked on
     part_list = []
     
     # Open all the files to chunk
-    input_handles = [open(x) for x in file_names]
+    input_handles = [open(os.path.join(work_dir, x)) for x in file_names]
     
     for i in xrange(part_count):
         # For each part we need to do
     
         for input_handle in input_handles:
             # For each file that's open
-            with job.fileStore.writeGlobalFileStream() as (chunk_handle, chunk_id):
+            with job.fileStore.writeGlobalFileStream() as (chunk_handle,
+                chunk_id):
                 # Open a chunk file to fill in
                 for line in itertools.islice(input_handle,
                     records_per_part * lines_per_record):
@@ -1006,24 +1048,31 @@ def align_to_hgvm_job(job, options, hgvm, fastqs=[], sequences=None):
     Does the whole alignment as a single job.
     """
     
+    # Make a work directory for Docker
+    work_dir = job.fileStore.getLocalTempDir()
+    
     # Download the HGVM
-    hgvm_dir = job.fileStore.getLocalTempDir()
-    hgvm.download(job.fileStore, hgvm_dir)
+    hgvm_dir = "hgvm"
+    hgvm.download(job.fileStore, os.path.join(work_dir, hgvm_dir))
     
     # Prepare some args to align to the HGVM
     vg_args = ["vg", "map", "-t", "32", "--try-up-to", "4", "--hit-max", "512",
         "--drop-chain", "0.5", "-x", os.path.join(hgvm_dir, "hgvm.xg"),
         "-g", os.path.join(hgvm_dir, "hgvm.gcsa")]
         
-    for fastq_id in fastqs:
+    for i, fastq_id in enumerate(fastqs):
         # Download and point at all the FASTQs
-        fastq_filename = job.fileStore.readGlobalFile(fastq_id)
+        fastq_filename = "fastq{}.fastq".format(i)
+        job.fileStore.readGlobalFile(fastq_id,
+            os.path.join(work_dir, fastq_filename))
         vg_args.append("--fastq")
         vg_args.append(fastq_filename)
         
     if sequences is not None:
         # Download and point to the sequences file
-        sequences_filename = job.fileStore.readGlobalFile(sequences)
+        sequences_filename = "sequences.txt"
+        job.fileStore.readGlobalFile(sequences,
+            os.path.join(work_dir, sequences_filename))
         vg_args.append("--reads")
         vg_args.append(sequences_filename)
     
@@ -1034,7 +1083,8 @@ def align_to_hgvm_job(job, options, hgvm, fastqs=[], sequences=None):
     
     with job.fileStore.writeGlobalFileStream() as (gam_handle, gam_id):
         # Align and stream GAM to the filestore
-        options.drunner.call(job, [vg_args], outfile=gam_handle)
+        options.drunner.call(job, [vg_args], outfile=gam_handle,
+            work_dir=work_dir)
     
     return gam_id
     
@@ -1045,11 +1095,17 @@ def pileup_on_hgvm_job(job, options, hgvm, gam_id):
     
     """
 
+    # Make a work directory for Docker
+    work_dir = job.fileStore.getLocalTempDir()
+
     # Download just the vg
-    vg_filename = job.fileStore.readGlobalFile(hgvm.get("hgvm.vg"))
+    vg_filename = "graph.vg"
+    job.fileStore.readGlobalFile(hgvm.get("hgvm.vg"),
+        os.path.join(work_dir, vg_filename))
     
     # Download the GAM
-    gam_filename = job.fileStore.readGlobalFile(gam_id)
+    gam_filename = "aligned.gam"
+    job.fileStore.readGlobalFile(gam_id, os.path.join(work_dir, gam_filename))
     
     # Set up the VG run
     vg_args = ["vg", "pileup", vg_filename, gam_filename]
@@ -1058,7 +1114,8 @@ def pileup_on_hgvm_job(job, options, hgvm, gam_id):
     
     with job.fileStore.writeGlobalFileStream() as (pileup_handle, pileup_id):
         # Pile up and stream the pileup to the file store
-        options.drunner.call(job, [vg_args], outfile=pileup_handle)
+        options.drunner.call(job, [vg_args], outfile=pileup_handle,
+            work_dir=work_dir)
     
     return pileup_id
     
@@ -1137,9 +1194,12 @@ def subset_graph_job(job, options, eval_plan, call_directory):
     sample graph's file ID.
     """
     
+    # Define a work_dir so Docker can work
+    work_dir = job.fileStore.getLocalTempDir()
+    
     # Download the calling results
-    call_dir = job.fileStore.getLocalTempDir()
-    call_directory.download(job.fileStore, call_dir)
+    call_dir = "call"
+    call_directory.download(job.fileStore, os.path.join(work_dir, call_dir))
     
     # Set up the VG run
     vg_args = ["vg", "mod", "--sample-graph", call_dir + "/calls.loci",
@@ -1147,7 +1207,8 @@ def subset_graph_job(job, options, eval_plan, call_directory):
         
     with job.fileStore.writeGlobalFileStream() as (sample_handle, sample_id):
         # Stream the sample graph to the file store
-        options.drunner.call(job, [vg_args], outfile=sample_handle)
+        options.drunner.call(job, [vg_args], outfile=sample_handle,
+            work_dir=work_dir)
         
     return sample_id
     
@@ -1157,18 +1218,24 @@ def realignment_stats_job(job, options, eval_plan, vg_id, gam_id):
     
     """
     
+    # Define a work_dir so Docker can work
+    work_dir = job.fileStore.getLocalTempDir()
+    
     # Download the VG file
-    vg_name = job.fileStore.readGlobalFile(vg_id)
+    vg_name = "graph.vg"
+    job.fileStore.readGlobalFile(vg_id, os.path.join(work_dir, vg_name))
     
     # Download the GAM file
-    gam_name = job.fileStore.readGlobalFile(gam_id)
+    gam_name = "aligned.gam"
+    job.fileStore.readGlobalFile(gam_id, os.path.join(work_dir, gam_name))
     
     # Set up the VG run
     vg_args = ["vg", "stats", "--verbose", "--alignments", gam_name, vg_name]
         
     with job.fileStore.writeGlobalFileStream() as (stats_handle, stats_id):
         # Stream the stats to the file store
-        options.drunner.call(job, [vg_args], outfile=stats_handle)
+        options.drunner.call(job, [vg_args], outfile=stats_handle,
+            work_dir=work_dir)
         
     return stats_id
     
@@ -1224,14 +1291,19 @@ def measure_graph_job(job, options, vg_id):
     count).
     """
     
+    # Define a work_dir so Docker can work
+    work_dir = job.fileStore.getLocalTempDir()
+    
     # Download just the vg
-    vg_filename = job.fileStore.readGlobalFile(vg_id)
+    vg_filename = "graph.vg"
+    job.fileStore.readGlobalFile(vg_id, os.path.join(work_dir, vg_filename))
     
     # Set up the VG run
     vg_args = ["vg", "stats", "--size", "--length", vg_filename]
     
     # Call and stream the Locus data to the file store
-    stats = options.drunner.call(job, [vg_args], check_output = True)
+    stats = options.drunner.call(job, [vg_args], check_output=True,
+        work_dir=work_dir)
     
     # Fill in these stat variables
     bp_length = None
