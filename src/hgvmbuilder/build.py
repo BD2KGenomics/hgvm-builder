@@ -1021,12 +1021,12 @@ def align_to_hgvm_chunked_job(job, options, hgvm, fastqs=[],
                 # Use the one-element parts lists as sequence files
                 rvs.append(job.addChildJobFn(align_to_hgvm_job, options, hgvm,
                     sequences=part_list[0],
-                    cores=32, memory="50G", disk="100G").rv())
+                    cores=32, memory="200G", disk="200G").rv())
             else:
                 # Use the multi-element parts lists as FASTQs
                 rvs.append(job.addChildJobFn(align_to_hgvm_job, options, hgvm,
                     fastqs=part_list,
-                    cores=32, memory="50G", disk="100G").rv())
+                    cores=32, memory="200G", disk="200G").rv())
         # Return all the aligned parts
         return rvs
             
