@@ -1750,7 +1750,8 @@ def main_job(job, options, plan, eval_plan, recall_plan):
     options.drunner.call(job, [["samtools", "--version"]])
     
     # And hal2vg (which can't be made to succeed with no real arguments...)
-    options.drunner.call(job, [["which", "hal2vg"]])
+    #options.drunner.call(job, [["which", "hal2vg"]])
+    # TODO: Dockerize hal2vg
     
     # Build the HGVM
     build_job = job.addChildJobFn(hgvm_build_job, options, plan,
