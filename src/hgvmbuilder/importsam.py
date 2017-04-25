@@ -106,7 +106,7 @@ def extract_job(job, options, sam_url):
     
     # Convert and return FASTQs
     return job.addChildJobFn(convert_job, options, sam_url, bam_id,
-        cores=4, memory="16G", disk="1000G").rv()
+        cores=4, memory="16G", disk="500G").rv()
         
 def convert_job(job, options, sam_url, bam_id):
     """
@@ -184,7 +184,7 @@ def main_job(job, options, sam_urls):
         # Go download and convert the reads, and stick the FASTQs in a directory
         subdir_promises[sam_filename] = ToilPromise.wrap(
             job.addChildJobFn(extract_job, options, sam_url,
-            cores=1, memory="16G", disk="1000G")
+            cores=1, memory="16G", disk="500G")
         ).then(lambda (fq1, fq2): Directory({
             "fq1.fastq": fq1, "fq2.fastq": fq2}))
         
