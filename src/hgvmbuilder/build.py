@@ -1056,8 +1056,7 @@ def align_to_hgvm_job(job, options, hgvm, fastqs=[], sequences=None):
     hgvm.download(job.fileStore, os.path.join(work_dir, hgvm_dir))
     
     # Prepare some args to align to the HGVM
-    vg_args = ["vg", "map", "-t", "32", "--try-up-to", "4", "--hit-max", "512",
-        "--drop-chain", "0.5", "-x", os.path.join(hgvm_dir, "hgvm.xg"),
+    vg_args = ["vg", "map", "-t", "32", "-x", os.path.join(hgvm_dir, "hgvm.xg"),
         "-g", os.path.join(hgvm_dir, "hgvm.gcsa")]
         
     for i, fastq_id in enumerate(fastqs):

@@ -186,6 +186,8 @@ def copy_batch(job, options, batch):
             (handle, path) = tempfile.mkstemp(dir=job.fileStore.getLocalTempDir())
             os.close(handle)        
             
+            RealtimeLogger.debug("Download {}".format(filename))
+            
             # Download
             in_store.read_input_file(filename, path)
             # Store
