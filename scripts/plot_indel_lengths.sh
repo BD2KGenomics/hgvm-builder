@@ -41,7 +41,7 @@ fi
     --title "Deletion lengths >=${SV_SIZE} in ${SAMPLE_COUNT} samples" \
     --x_label "Length (bp)" --y_label "Deletion count" --save svlens.del.png \
     --line --no_n \
-    --bins 30 --no_zero_ends --split_at_zero --x_max "-${SV_SIZE}" \
+    --bins 30 --no_zero_ends --split_at_zero --x_max "-${SV_SIZE}" --sparse_x \
     --legend_overlay "upper left" \
     --style "-" \
     --category_labels "Detected" "Expected" \

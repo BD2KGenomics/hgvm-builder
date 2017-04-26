@@ -250,12 +250,16 @@ class SVRecallPlan(object):
         self.fastq_urls = collections.defaultdict(list)
         # This will hold single GAM URLs by sample name
         self.gam_urls = {}
+        # This will hold single call VCF URLs by sample name
+        self.vcf_urls ={}
         
         # Then these will hold the IDs, following the same shape.
         # For the FASTQs
         self.fastq_ids = collections.defaultdict(list)
-        # And the GAM
+        # And the GAMs
         self.gam_ids = {}
+        # And the VCFs
+        self.vcf_ids = {}
                     
         
     def add_sample_fastq(self, sample_name, fastq_url):
@@ -275,6 +279,15 @@ class SVRecallPlan(object):
         """
         
         self.gam_urls[sample_name] = gam_url
+        
+    def add_sample_vcf(self, sample_name, vcf_url):
+        """
+        Set the given VCF file to use instead of the FASTQsor GAM for the given
+        sample.
+        
+        """
+        
+        self.vcf_urls[sample_name] = vcf_url
         
     def add_sample_name(self, name):
         """
@@ -296,6 +309,13 @@ class SVRecallPlan(object):
         """
         
         return self.gam_ids.get(sample_name, None)
+        
+    def get_vcf_id(self, sample_name):
+        """
+        Get the VCF file ID to use for the given sample, or None.
+        """
+        
+        return self.vcf_ids.get(sample_name, None)
         
     def get_sample_names(self):
         """
@@ -326,5 +346,9 @@ class SVRecallPlan(object):
         for sample, url in self.gam_urls.iteritems():
             # Grab the GAM
             self.gam_ids[sample] = import_function(url)
+            
+        for sample, url in self.vcf_urls.iteritems():
+            # Grab the VCF
+            self.vcf_ids[sample] = import_function(url)
         
     

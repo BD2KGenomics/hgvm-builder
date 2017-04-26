@@ -146,6 +146,10 @@ def parse_args(args):
     sv_read_source.add_argument("--sv_sample_gam_url", action="append",
         default=[],
         help="GAM for pre-aligned evaluation reads instead of FASTQs")
+    # Instead of either of those, we could also use VCFs instead.
+    sv_read_source.add_argument("--sv_sample_vcf_url", action="append",
+        default=[],
+        help="VCF for pre-computed sample genotypes for recall analysis")
         
     # Output
     parser.add_argument("out_url",
@@ -238,7 +242,7 @@ def create_eval_plan(control_url, xg_url, gcsa_url, sample_fq_urls,
         
     return eval_plan
     
-def create_recall_plan(sample_fastq_urls, gam_urls, sample_names):
+def create_recall_plan(sample_fastq_urls, gam_urls, vcf_urls, sample_names):
     """
     Create an SVRecallPlan to evaluate structural variant recall for the given
     sample, using the given FASTQs or pre-aligned GAM.
@@ -252,22 +256,17 @@ def create_recall_plan(sample_fastq_urls, gam_urls, sample_names):
         
     if len(sample_fastq_urls) == len(sample_names):
         # Unpaired FASTQ (or no FASTQs)
-        
         for sample_name, sample_fastq_url in itertools.izip(sample_names,
             sample_fastq_urls):
             # Operate on one FASTQ per sample, and associate it with the sample
             recall_plan.add_sample_fastq(sample_name, sample_fastq_url)
-        
     elif len(sample_fastq_urls) == 2 * len(sample_names):
-        
         for sample_name, (fastq1, fastq2) in itertools.izip(sample_names,
             more_itertools.grouper(2, sample_fastq_urls)):
             # For every sample name and the corresponding pair of FASTQs
-            
             # Add both the FASTQs for the sample
             recall_plan.add_sample_fastq(sample_name, fastq1)
             recall_plan.add_sample_fastq(sample_name, fastq2)
-    
     elif len(sample_fastq_urls) != 0:
         # Not sure what the user thinks we're going to be able to do with this
         # weird mismatched set of FASTQs.
@@ -277,20 +276,27 @@ def create_recall_plan(sample_fastq_urls, gam_urls, sample_names):
     
     if len(gam_urls) == len(sample_names):
         # We have one GAM per sample instead of FASTQs
-        
         for sample_name, gam_url in itertools.izip(sample_names, gam_urls):
             # Operate on one GAM per sample, and associate it with the sample
             recall_plan.add_sample_gam(sample_name, gam_url)
-        
     elif len(gam_urls) != 0:
         raise RuntimeError("Cannot match up {} GAMs with {} samples.".format(
             len(gam_urls), len(sample_names)))
             
+    if len(vcf_urls) == len(sample_names):
+        # We have one VCF per sample instead of FASTQs or GAMs
+        for sample_name, vcf_url in itertools.izip(sample_names, vcf_urls):
+            # Operate on one VCF per sample, and associate it with the sample
+            recall_plan.add_sample_vcf(sample_name, vcf_url)
+    elif len(vcf_urls) != 0:
+        raise RuntimeError("Cannot match up {} VCFs with {} samples.".format(
+            len(vcf_urls), len(sample_names)))
+            
     if (len(gam_urls) == 0 and len(sample_fastq_urls) == 0 and
-        len(sample_names) > 0):
-        # We have no reads for our samples!
+        len(vcf_urls) == 0 and len(sample_names) > 0):
+        # We have no reads or calls for our samples!
         raise RuntimeError("Cannot do recall evaluation on any samples "
-            "without reads for them")
+            "without reads or calls for them")
         
         
     return recall_plan
@@ -1595,11 +1601,15 @@ def measure_sv_recall_job(job, options, call_dir, truth_vcfs, sample_name,
             
             # Add an interval around the SV call
             contig_trees[record.CHROM].addi(record.POS - radius,
-                record.POS + radius, True)
+                record.POS + radius, record.POS)
                 
     # Set up some stats to fill in
     found_svs = 0
     total_svs = 0
+    
+    # This maps from recalled position to positions that the recalling calls are
+    # at
+    recalling_positions = collections.defaultdict(set)
                 
     # Then loop over the truth VCFs
     for vcf_id in truth_vcfs:
@@ -1632,6 +1642,9 @@ def measure_sv_recall_job(job, options, call_dir, truth_vcfs, sample_name,
                     # We hit near enough to a called variant, so this SV is
                     # recalled.
                     found_svs += 1
+                    
+                    for recalling in contig_trees[chrom_name][record.POS]:
+                        recalling_positions[record.POS].add(recalling.data)
     
     # Compute the portion recalled and output a TSV with it and the totals
     portion_recalled = float(found_svs) / total_svs if total_svs > 0 else 0
@@ -1642,6 +1655,11 @@ def measure_sv_recall_job(job, options, call_dir, truth_vcfs, sample_name,
         writer.line("Found", found_svs)
         writer.line("Total", total_svs)
         writer.line("Recall", portion_recalled)
+        
+        for pos, recalled_by in recalling_positions.iteritems():
+            # Dump all the recall relationships
+            writer.comment("{}: {}".format(pos, ",".join(
+                [str(x) for x in recalled_by])))
         
         return Directory({"recall.tsv": tsv_id})
     
@@ -1663,44 +1681,60 @@ def hgvm_sv_recall_job(job, options, plan, recall_plan, hgvm):
     for sample_name in recall_plan.get_sample_names():
         # For each sample we want to compute recall for
     
-        if recall_plan.get_gam_id(sample_name) is not None:
-            # We can just use this GAM
-            align_promise = ToilPromise.resolve(job, Directory(
-                {"aligned.gam": recall_plan.get_gam_id(sample_name)}))
-            # Do the pileup as a child
-            pileup_job = job.addChildJobFn(pileup_on_hgvm_job, options,
-                hgvm, recall_plan.get_gam_id(sample_name),
-                cores=1, memory="50G", disk="100G")
-        else:
-            # We have to actually align some FASTQs    
-            fastqs=recall_plan.get_fastq_ids(sample_name)
-            if len(fastqs) == 0:
-                # We have a sample with no FASTQ and no GAM
-                raise RuntimeError("No reads available for recall evaluation "
-                    "on {}".format(sample_name))
+        # Within each sample we promise Directories with evaluation files which
+        # we are going to merge.
+        dir_promises = []
+    
+        if recall_plan.get_vcf_id(sample_name) is not None:
+            # We already have a VCF for this sample. Use it.
             
-            # Align the reads
-            align_job = job.addChildJobFn(align_to_hgvm_chunked_job, options,
-                hgvm, fastqs=fastqs,
-                cores=16, memory="50G", disk="100G")
-            # Put it in a Directory in a promise
-            align_promise = ToilPromise.wrap(align_job).then(
-                lambda id: Directory({"aligned.gam": id}))
+            # Just emit a Directory with those as the calls
+            call_promise = ToilPromise.resolve(job,
+                Directory({"calls.vcf": recall_plan.get_vcf_id(sample_name)}))
+            dir_promises.append(call_promise)
+        else:
+            if recall_plan.get_gam_id(sample_name) is not None:
+                # We can just use this GAM
+                align_promise = ToilPromise.resolve(job, Directory(
+                    {"aligned.gam": recall_plan.get_gam_id(sample_name)}))
+                dir_promises.append(align_promise)
+                # Do the pileup as a child
+                pileup_job = job.addChildJobFn(pileup_on_hgvm_job, options,
+                    hgvm, recall_plan.get_gam_id(sample_name),
+                    cores=1, memory="50G", disk="100G")
+            else:
+                # We have to actually align some FASTQs    
+                fastqs=recall_plan.get_fastq_ids(sample_name)
+                if len(fastqs) == 0:
+                    # We have a sample with no FASTQ and no GAM
+                    raise RuntimeError("No reads available for recall evaluation "
+                        "on {}".format(sample_name))
                 
-            # Then do the pileup as a follow-on
-            pileup_job = align_job.addFollowOnJobFn(pileup_on_hgvm_job, options,
-                hgvm, align_job.rv(),
-                cores=1, memory="50G", disk="100G")
-        # Put it in a Directory in a promise
-        pileup_promise = ToilPromise.wrap(pileup_job).then(
-            lambda id: Directory({"pileup.vgpu": id}))
+                # Align the reads
+                align_job = job.addChildJobFn(align_to_hgvm_chunked_job, options,
+                    hgvm, fastqs=fastqs,
+                    cores=16, memory="50G", disk="100G")
+                # Put it in a Directory in a promise
+                align_promise = ToilPromise.wrap(align_job).then(
+                    lambda id: Directory({"aligned.gam": id}))
+                dir_promises.append(align_promise)
+                    
+                # Then do the pileup as a follow-on
+                pileup_job = align_job.addFollowOnJobFn(pileup_on_hgvm_job, options,
+                    hgvm, align_job.rv(),
+                    cores=1, memory="50G", disk="100G")
+            # Put it in a Directory in a promise
+            pileup_promise = ToilPromise.wrap(pileup_job).then(
+                lambda id: Directory({"pileup.vgpu": id}))
+            dir_promises.append(pileup_promise)
         
-        # Then do the calling
-        call_job = pileup_job.addFollowOnJobFn(call_on_hgvm_job, options,
-            hgvm, pileup_job.rv(), vcf=True,
-            cores=1, memory="100G", disk="50G")
-        # And a promise for the call results directory.
-        call_promise = ToilPromise.wrap(call_job)
+            # Then do the calling
+            call_job = pileup_job.addFollowOnJobFn(call_on_hgvm_job, options,
+                hgvm, pileup_job.rv(), vcf=True,
+                cores=1, memory="100G", disk="50G")
+            # And a promise for the call results directory.
+            call_promise = ToilPromise.wrap(call_job)
+            dir_promises.append(call_promise)
         
         # Collect the expected variants from all the input VCFs for the
         # chromosomes we did
@@ -1713,15 +1747,15 @@ def hgvm_sv_recall_job(job, options, plan, recall_plan, hgvm):
         
         # Compare the expected variants to the observed variants and compute the
         # fraction recalled
-        compare_job = call_job.addFollowOnJobFn(measure_sv_recall_job, options,
-            call_job.rv(), truth_vcfs, sample_name,
+        compare_job = call_promise.addFollowOnJobFn(measure_sv_recall_job,
+            options, call_promise.unwrap_result(), truth_vcfs, sample_name,
             cores=1, memory="8G", disk="100G")
         # And add a promise for its results Directory
         compare_promise = ToilPromise.wrap(compare_job)
+        dir_promises.append(compare_promise)
     
         # Promise all that in a Directory
-        sample_promises.append(ToilPromise.all([align_promise, pileup_promise,
-            call_promise, compare_promise]).then(
+        sample_promises.append(ToilPromise.all(dir_promises).then(
             lambda dirs: dirs[0].merge(*dirs[1:])))
          
     # Mount all the per-sample directories under their sample names   
@@ -1812,7 +1846,8 @@ def main(args):
                 
             # And the SV recall plan
             recall_plan = create_recall_plan(options.sv_sample_fastq_url,
-                options.sv_sample_gam_url, options.sv_sample_name)
+                options.sv_sample_gam_url, options.sv_sample_vcf_url,
+                options.sv_sample_name)
         
             # Import all the files from the plans. Now the plans will hold Toil
             # IDs for data files, and actual info for metadata files.
