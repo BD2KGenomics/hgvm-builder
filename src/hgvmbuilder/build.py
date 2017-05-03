@@ -186,6 +186,10 @@ def create_plan(assembly_url, vcfs_urls, vcf_urls, vcf_contigs, hal_url,
         # Parse each VCF directory and add the VCFs
         thousandgenomesparser.parse(plan, vcfs_url)
         
+    if len(vcf_contigs) != len(vcf_urls):
+        # We need these to be in correspondence
+        raise RuntimeError("Must use the same number of VCFs as contigs")
+        
     for vcf_url, vcf_contig in itertools.izip(vcf_urls, vcf_contigs):
         # Add each single-contig VCF for its contig
         plan.add_variants(vcf_contig, vcf_url)
