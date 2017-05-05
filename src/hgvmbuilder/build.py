@@ -1136,8 +1136,6 @@ def call_on_hgvm_job(job, options, hgvm, pileup_id, vcf=False):
     
     """
 
-    # Define a work_dir so Docker can work
-    work_dir = job.fileStore.getLocalTempDir()
 
     if hgvm.has_file("hgvm.json"):
         # Load the manifest, which lists the primary paths, which we want to
@@ -1149,52 +1147,18 @@ def call_on_hgvm_job(job, options, hgvm, pileup_id, vcf=False):
         RealtimeLogger.warn("Creating fake manifest with no primary paths!")
         manifest = Manifest()
         
-    # Download the vg
-    vg_filename = "hgvm.vg"
-    job.fileStore.readGlobalFile(hgvm.get("hgvm.vg"),
-        os.path.join(work_dir, vg_filename))
+    # Kick off a job to do the actual calling, and return the vcf/loci and the
+    # augmented graph.
+    call_job = job.addChildJobFn(toilvgfacade.vg_call_job, options,
+        hgvm.get("hgvm.vg"), pileup_id, vcf=vcf,
+        primary_paths=manifest.get("primary_paths", []))
         
-    # Download the pileup
-    pileup_filename = "pileup.vgpu"
-    job.fileStore.readGlobalFile(pileup_id,
-        os.path.join(work_dir, pileup_filename))
-    
-    # Pick an augmented graph filename
-    augmented_filename = "augmented.vg"
-    
-    # Make arguments to annotate all the reference paths
-    ref_args = []
-    for ref_path in manifest.get("primary_paths", []):
-        # For every primary path we have defined, tell the caller to use it as a
-        # reference path.
-        ref_args.append("--ref")
-        ref_args.append(ref_path)
-    
-    # Set up the VG run
-    vg_args = ["vg", "call", "--aug-graph", augmented_filename, vg_filename,
-        pileup_filename] + ref_args
-        
-    if not vcf:
-        # Don'tmake a VCF
-        vg_args.append("--no-vcf")
-    
-    # TODO: configure thresholds and filters
-    
-    with job.fileStore.writeGlobalFileStream() as (output_handle, output_id):
-        # Call and stream the Locus or VCF data to the file store
-        options.drunner.call(job, [vg_args], outfile=output_handle,
-            work_dir=work_dir)
-        
-    # Upload the augmented graph
-    augmented_id = job.fileStore.writeGlobalFile(
-        os.path.join(work_dir, augmented_filename))
-    
-    # Put the files in a Directory
-    results = Directory()
-    results.add("augmented.vg", augmented_id)
-    results.add("calls.vcf" if vcf else "calls.loci", output_id)
-    
-    return results
+    # Package the results into a directory and return it.
+    return ToilPromise.wrap(call_job
+        ).then(lambda (output_id, augmented_id): Directory({
+            "calls.vcf" if vcf else "calls.loci": output_id,
+            "augmented.vg": augmented_id
+        })).unwrap_result()
     
 def subset_graph_job(job, options, eval_plan, call_directory):
     """
