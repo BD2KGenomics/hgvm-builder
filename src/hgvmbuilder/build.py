@@ -116,6 +116,8 @@ def parse_args(args):
         
     # For realignment evaluation
     realignment_group = parser.add_argument_group("Realignment evaluation")
+    realignment_group.add_argument("--control_graph_hgvm_url", default=None,
+        help="use the given hgvm directory as a control")
     realignment_group.add_argument("--control_graph_url", default=None,
         help="use the given vg file as a control")
     realignment_group.add_argument("--control_graph_xg_url", default=None,
@@ -214,8 +216,8 @@ def create_plan(assembly_url, vcfs_urls, vcf_urls, vcf_contigs, hal_url,
     # Return the completed plan
     return plan
     
-def create_eval_plan(control_url, xg_url, gcsa_url, sample_fq_urls,
-    sequences_url):
+def create_eval_plan(control_hgvm_url, control_url, xg_url, gcsa_url,
+    sample_fq_urls, sequences_url):
     """
     Create an EvaluationPlan to compare againbst the given control graph (with
     the given xg, and GCSA/LCP indexes), by variant calling with the given
@@ -224,17 +226,27 @@ def create_eval_plan(control_url, xg_url, gcsa_url, sample_fq_urls,
     
     eval_plan = EvaluationPlan()
     
-    if control_url is not None:
-        # Grab the control graph
-        eval_plan.set_control_graph(control_url)
-    
-    if xg_url is not None:
-        # And its XG index
-        eval_plan.set_control_graph_xg(xg_url)
-   
-    if gcsa_url is not None:
-        # And its GCSA/LCP index. Assume the lcp is named right
-        eval_plan.set_control_graph_gcsa(gcsa_url, gcsa_url + ".lcp")
+    if control_hgvm_url is not None:
+        # Grab the control hgvm
+        eval_plan.set_control_hgvm(control_hgvm_url)
+        
+        # We can only use one of these sets. TODO: push this requirement into
+        # argparse.
+        assert(control_url is None)
+        assert(xg_url is None)
+        assert(gcsa_url is None)
+    else:
+        if control_url is not None:
+            # Grab the control graph
+            eval_plan.set_control_graph(control_url)
+        
+        if xg_url is not None:
+            # And its XG index
+            eval_plan.set_control_graph_xg(xg_url)
+       
+        if gcsa_url is not None:
+            # And its GCSA/LCP index. Assume the lcp is named right
+            eval_plan.set_control_graph_gcsa(gcsa_url, gcsa_url + ".lcp")
         
     for url in sample_fq_urls:
         # And all the FASTQs
@@ -1378,15 +1390,17 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
         # or None if no control graph is specified.
         control_length_promise = None
         
-        if eval_plan.get_control_graph_id() is not None:
+        control_hgvm = eval_plan.get_packaged_control()
+        
+        if control_hgvm is not None:
             # Add in the control. TODO: assumes it is already indexed. We should
             # check and index it if it's not.
-            graphs_to_test["control"] = eval_plan.get_packaged_control()
+            graphs_to_test["control"] = control_hgvm
             
             # Get a promise for the control's length
             control_length_promise=ToilPromise.wrap(job.addChildJobFn(
                 measure_graph_job, options,
-                eval_plan.get_control_graph_id(),
+                control_hgvm.get("hgvm.vg"),
                 cores=1, memory="50G", disk="50G"))
         else:
             # Say we can't know the control's length
@@ -1808,9 +1822,10 @@ def main(args):
                 options.base_vg_url, options.hgvm_url)
                 
             # Also build the realignment evaluation plan on the head node
-            eval_plan = create_eval_plan(options.control_graph_url,
-                options.control_graph_xg_url, options.control_graph_gcsa_url,
-                options.sample_fastq_url, options.eval_sequences_url)
+            eval_plan = create_eval_plan(options.control_graph_hgvm_url, 
+                options.control_graph_url, options.control_graph_xg_url,
+                options.control_graph_gcsa_url, options.sample_fastq_url,
+                options.eval_sequences_url)
                 
             # And the SV recall plan
             recall_plan = create_recall_plan(options.sv_sample_fastq_url,
