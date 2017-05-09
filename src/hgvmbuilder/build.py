@@ -1593,6 +1593,10 @@ def measure_sv_recall_job(job, options, call_dir, truth_vcfs, sample_name,
     # at
     recalling_positions = collections.defaultdict(set)
                 
+    # This holds a set of seen CHROM, POS pairs, so we don't count the duplicate
+    # multiple-lengths-of-a-single-SV variants as the same variant.
+    seen_truth_starts = set()
+                
     # Then loop over the truth VCFs
     for vcf_id in truth_vcfs:
         with job.fileStore.readGlobalFileStream(vcf_id) as truth:
@@ -1611,6 +1615,15 @@ def measure_sv_recall_job(job, options, call_dir, truth_vcfs, sample_name,
                 if record.genotype(sample_name)["GT"] in {"0/0", "0|0", "0"}:
                     # Skip SVs that aren't actually supposed to be in the sample
                     continue
+                    
+                # Has this been seen before?
+                pos_key = (record.CHROM, record.POS)
+                if pos_key in seen_truth_starts:
+                    # This has been seen before (or another variant at the same
+                    # site, which we're going to consider the same for our
+                    # purposes).
+                    continue
+                seen_truth_starts.add(pos_key)
                     
                 # This is an SV
                 total_svs += 1
