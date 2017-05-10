@@ -797,23 +797,17 @@ def graphs_to_hgvm_job(job, options, vg_ids, primary_paths=None):
         "uuid": str(uuid.uuid4())
     })
     
-    # Shift all the graphs so their ID ranges don't conflict
-    shift_job = job.addChildJobFn(shift_vgs_job, options, vg_ids)
-    
-    # Merge the graphs without changing IDs, by concatenation
-    merge_job = shift_job.addFollowOnJobFn(concat_job, options, vg_ids,
-        cores=1, memory="4G", disk="100G")
-    
-    # TODO: guess the primary path name and pass it through to the
-    # indexing.
+    # Merge all the graphs because we know that actually works
+    merge_job = job.addChildJobFn(merge_vgs_job, options, vg_ids,
+        cores=1, memory="100G", disk="20G")
     
     # Make the indexes using the individual graph files
-    xg_job = shift_job.addFollowOnJobFn(toilvgfacade.xg_index_job, options,
-        shift_job.rv())
+    xg_job = merge_job.addFollowOnJobFn(toilvgfacade.xg_index_job, options,
+        [merge_job.rv()])
     # Forward the primary paths on to the GCSA indexer, if specified, so they
     # can always be included.
-    gcsa_job = shift_job.addFollowOnJobFn(toilvgfacade.gcsa_index_job, options,
-        shift_job.rv(), primary_paths)
+    gcsa_job = merge_job.addFollowOnJobFn(toilvgfacade.gcsa_index_job, options,
+        [merge_job.rv()], primary_paths)
     
     # Make a packaging job to package along with the single concatenated graph
     hgvm_job = xg_job.addFollowOnJobFn(hgvm_package_job, options,
@@ -1420,7 +1414,7 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
             # Looping over the experimental and the control...
         
             align_job = job.addChildJobFn(align_to_hgvm_chunked_job, options,
-                hgvm, fastqs=eval_plan.get_fastq_ids(),
+                package, fastqs=eval_plan.get_fastq_ids(),
                 cores=16, memory="50G", disk="100G")
             # Put it in a Directory in a promise
             align_promise = ToilPromise.wrap(align_job).then(
@@ -1428,7 +1422,7 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
             
             # Then do the pileup
             pileup_job = align_job.addFollowOnJobFn(pileup_on_hgvm_job, options,
-                hgvm, align_job.rv(),
+                package, align_job.rv(),
                 cores=1, memory="50G", disk="100G")
             # Put it in a Directory in a promise
             pileup_promise = ToilPromise.wrap(pileup_job).then(
@@ -1436,7 +1430,7 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
             
             # Then do the calling
             call_job = pileup_job.addFollowOnJobFn(call_on_hgvm_job, options,
-                hgvm, pileup_job.rv(),
+                package, pileup_job.rv(),
                 cores=1, memory="100G", disk="50G")
             # And a promise for the call results directory.
             call_promise = ToilPromise.wrap(call_job)
