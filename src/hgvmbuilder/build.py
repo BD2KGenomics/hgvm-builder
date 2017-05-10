@@ -27,6 +27,7 @@ import more_itertools
 import shutil
 import datetime
 import uuid
+import random
 
 import tsv
 import intervaltree
@@ -1133,10 +1134,19 @@ def pileup_on_hgvm_job(job, options, hgvm, gam_id):
     
     # TODO: configure filtering and stuff
     
-    with job.fileStore.writeGlobalFileStream() as (pileup_handle, pileup_id):
-        # Pile up and stream the pileup to the file store
-        options.drunner.call(job, [vg_args], outfile=pileup_handle,
-            work_dir=work_dir)
+    try:
+        with job.fileStore.writeGlobalFileStream() as (pileup_handle, pileup_id):
+            # Pile up and stream the pileup to the file store
+            options.drunner.call(job, [vg_args], outfile=pileup_handle,
+                work_dir=work_dir)
+    except Exception as e:
+        logging.error("Failed. Dumping files.")
+        
+        hgvm.add("aligned.gam", gam_id)
+        hgvm.dump(job.fileStore, "/home/anovak/dump/{}".format(
+            random.randint(0, 1000000000)))
+        raise e
+    
     
     return pileup_id
     
