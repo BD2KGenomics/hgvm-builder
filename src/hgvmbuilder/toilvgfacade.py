@@ -225,19 +225,21 @@ def gcsa_index_job(job, options, vg_ids, primary_path_names=None):
     # We also need a "chroms" giving the primary path for each graph. It's OK if
     # the path doesn't exist in a given graph, but if it does it will be added
     # to the index.
-    if primary_path_names is not None:
-        # We have primary path names to use
-        assert(len(primary_path_names) == len(vg_ids))
-        options.chroms = primary_path_names
-    else:
-        # Fake path names
-        options.chroms = ["" for x in vg_ids]
+    
+    # We have primary path names to use. We can just try and retain all ther
+    # paths in all graphs.
+    RealtimeLogger.info("Want to GCSA-index {} with paths {}".format(
+        vg_ids, primary_path_names))
+
+    # Fake path names
+    options.chroms = ["fake{}".format(i) for i in xrange(len(vg_ids))]
     
     # options.index_name has to have the basename for the .gcsa in the local
     # temp dir.
     options.index_name = "gcsaindex"
     
     return job.addChildJobFn(toil_vg.vg_index.run_gcsa_prep, options, vg_ids,
+        primary_path_override=primary_path_names,
         cores=options.misc_cores, memory=options.misc_mem,
         disk=options.misc_disk).rv()
         
