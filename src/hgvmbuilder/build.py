@@ -829,6 +829,11 @@ def hgvm_build_job(job, options, plan):
     if plan.hgvm_directory is not None:
         # We have something to just import
         RealtimeLogger.info("Using imported HGVM")
+        if plan.hgvm_directory.has_key("hgvm.json"):
+            manifest = Manifest.load(job.fileStore,
+                plan.hgvm_directory.get("hgvm.json"))
+            RealtimeLogger.info("Imported UUID: {}".format(
+                manifest.get("uuid", None)))
         
         if options.dump_hgvm is not None:
             # Dump it again. TODO: unify dump logic
