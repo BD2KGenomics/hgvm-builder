@@ -1460,6 +1460,11 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
                     align_to_hgvm_chunked_job, options, package_job.rv(),
                     sequences=eval_plan.get_eval_sequences_id(),
                     cores=16, memory="50G", disk="100G")
+                # And put that in a directory
+                realign_promise = ToilPromise.wrap(realign_job).then(
+                    lambda id: Directory({"realigned.gam": id}))
+                # And merge it with the others
+                dir_promises.append(realign_promise)
                     
                 # Then get the stats
                 stats_job = realign_job.addFollowOnJobFn(realignment_stats_job,
@@ -1502,11 +1507,15 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
                 options, eval_plan, graphs_to_test["control"].get("hgvm.vg"),
                 realign_job.rv(),
                 cores=1, memory="50G", disk="100G")
-            # And put them in a directory
-            stats_promise = ToilPromise.wrap(stats_job).then(
-                lambda id: Directory({"stats.tsv": id}))
+                
+            # Put both in a directory
+            realign_dir_promise = ToilPromise.all({
+                "realigned.gam": ToilPromise.wrap(realign_job),
+                "stats.tsv": ToilPromise.wrap(stats_job)
+            }).then(lambda x: Directory(x))
+                
             # And make a directory with just the stats for this condition
-            eval_promises[condition] = stats_promise
+            eval_promises[condition] = realign_dir_promise
             
             # Then parse them
             stats_parse_job = stats_job.addFollowOnJobFn(
