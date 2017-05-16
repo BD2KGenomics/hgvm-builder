@@ -1528,6 +1528,40 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
                 options, eval_plan, stats_job.rv())
             # And make a promise and save it
             stats_promises[condition] = ToilPromise.wrap(stats_parse_job)
+            
+        if eval_plan.get_eval_sequences_id() is not None:
+            # We can do an evaluation realigning the test sequences against just
+            # the HGVM itself, with no calling
+            condition = "nocall"
+            
+            # Realign and grab the realigned GAM
+            realign_job = job.addChildJobFn(align_to_hgvm_chunked_job,
+                options, hgvm,
+                sequences=eval_plan.get_eval_sequences_id(),
+                cores=16, memory="50G", disk="100G")
+                
+            # Then get the stats
+            stats_job = realign_job.addFollowOnJobFn(realignment_stats_job,
+                options, eval_plan, hgvm.get("hgvm.vg"),
+                realign_job.rv(),
+                cores=1, memory="50G", disk="100G")
+                
+            # Put both in a directory
+            realign_dir_promise = ToilPromise.all({
+                "realigned.gam": ToilPromise.wrap(realign_job),
+                "stats.tsv": ToilPromise.wrap(stats_job)
+            }).then(lambda x: Directory(x))
+                
+            # And make a directory with just the stats for this condition
+            eval_promises[condition] = realign_dir_promise
+            
+            # Then parse them
+            stats_parse_job = stats_job.addFollowOnJobFn(
+                parse_realignment_stats_job,
+                options, eval_plan, stats_job.rv())
+            # And make a promise and save it
+            stats_promises[condition] = ToilPromise.wrap(stats_parse_job)
+            
                 
         # Now we have evaluated all the conditions. Make a plot TSV.
         
