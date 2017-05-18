@@ -32,7 +32,9 @@ class Directory(object):
         """
         
         # This holds Toil IDs by file name
-        self.ids = values
+        # Make sure to copy it to aboid adding to our default value
+        # Or weird behavior when the caller modifies their dict.
+        self.ids = dict(values)
         
     def __repr__(self):
         """

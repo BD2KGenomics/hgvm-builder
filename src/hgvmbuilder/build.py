@@ -27,6 +27,7 @@ import more_itertools
 import shutil
 import datetime
 import uuid
+import random
 
 import tsv
 import intervaltree
@@ -116,6 +117,8 @@ def parse_args(args):
         
     # For realignment evaluation
     realignment_group = parser.add_argument_group("Realignment evaluation")
+    realignment_group.add_argument("--control_graph_hgvm_url", default=None,
+        help="use the given hgvm directory as a control")
     realignment_group.add_argument("--control_graph_url", default=None,
         help="use the given vg file as a control")
     realignment_group.add_argument("--control_graph_xg_url", default=None,
@@ -186,6 +189,10 @@ def create_plan(assembly_url, vcfs_urls, vcf_urls, vcf_contigs, hal_url,
         # Parse each VCF directory and add the VCFs
         thousandgenomesparser.parse(plan, vcfs_url)
         
+    if len(vcf_contigs) != len(vcf_urls):
+        # We need these to be in correspondence
+        raise RuntimeError("Must use the same number of VCFs as contigs")
+        
     for vcf_url, vcf_contig in itertools.izip(vcf_urls, vcf_contigs):
         # Add each single-contig VCF for its contig
         plan.add_variants(vcf_contig, vcf_url)
@@ -210,8 +217,8 @@ def create_plan(assembly_url, vcfs_urls, vcf_urls, vcf_contigs, hal_url,
     # Return the completed plan
     return plan
     
-def create_eval_plan(control_url, xg_url, gcsa_url, sample_fq_urls,
-    sequences_url):
+def create_eval_plan(control_hgvm_url, control_url, xg_url, gcsa_url,
+    sample_fq_urls, sequences_url):
     """
     Create an EvaluationPlan to compare againbst the given control graph (with
     the given xg, and GCSA/LCP indexes), by variant calling with the given
@@ -220,17 +227,27 @@ def create_eval_plan(control_url, xg_url, gcsa_url, sample_fq_urls,
     
     eval_plan = EvaluationPlan()
     
-    if control_url is not None:
-        # Grab the control graph
-        eval_plan.set_control_graph(control_url)
-    
-    if xg_url is not None:
-        # And its XG index
-        eval_plan.set_control_graph_xg(xg_url)
-   
-    if gcsa_url is not None:
-        # And its GCSA/LCP index. Assume the lcp is named right
-        eval_plan.set_control_graph_gcsa(gcsa_url, gcsa_url + ".lcp")
+    if control_hgvm_url is not None:
+        # Grab the control hgvm
+        eval_plan.set_control_hgvm(control_hgvm_url)
+        
+        # We can only use one of these sets. TODO: push this requirement into
+        # argparse.
+        assert(control_url is None)
+        assert(xg_url is None)
+        assert(gcsa_url is None)
+    else:
+        if control_url is not None:
+            # Grab the control graph
+            eval_plan.set_control_graph(control_url)
+        
+        if xg_url is not None:
+            # And its XG index
+            eval_plan.set_control_graph_xg(xg_url)
+       
+        if gcsa_url is not None:
+            # And its GCSA/LCP index. Assume the lcp is named right
+            eval_plan.set_control_graph_gcsa(gcsa_url, gcsa_url + ".lcp")
         
     for url in sample_fq_urls:
         # And all the FASTQs
@@ -780,23 +797,17 @@ def graphs_to_hgvm_job(job, options, vg_ids, primary_paths=None):
         "uuid": str(uuid.uuid4())
     })
     
-    # Shift all the graphs so their ID ranges don't conflict
-    shift_job = job.addChildJobFn(shift_vgs_job, options, vg_ids)
-    
-    # Merge the graphs without changing IDs, by concatenation
-    merge_job = shift_job.addFollowOnJobFn(concat_job, options, vg_ids,
-        cores=1, memory="4G", disk="100G")
-    
-    # TODO: guess the primary path name and pass it through to the
-    # indexing.
+    # Merge all the graphs because we know that actually works
+    merge_job = job.addChildJobFn(merge_vgs_job, options, vg_ids,
+        cores=1, memory="100G", disk="20G")
     
     # Make the indexes using the individual graph files
-    xg_job = shift_job.addFollowOnJobFn(toilvgfacade.xg_index_job, options,
-        shift_job.rv())
+    xg_job = merge_job.addFollowOnJobFn(toilvgfacade.xg_index_job, options,
+        [merge_job.rv()])
     # Forward the primary paths on to the GCSA indexer, if specified, so they
     # can always be included.
-    gcsa_job = shift_job.addFollowOnJobFn(toilvgfacade.gcsa_index_job, options,
-        shift_job.rv(), primary_paths)
+    gcsa_job = merge_job.addFollowOnJobFn(toilvgfacade.gcsa_index_job, options,
+        [merge_job.rv()], primary_paths)
     
     # Make a packaging job to package along with the single concatenated graph
     hgvm_job = xg_job.addFollowOnJobFn(hgvm_package_job, options,
@@ -818,6 +829,11 @@ def hgvm_build_job(job, options, plan):
     if plan.hgvm_directory is not None:
         # We have something to just import
         RealtimeLogger.info("Using imported HGVM")
+        if plan.hgvm_directory.has_file("hgvm.json"):
+            manifest = Manifest.load(job.fileStore,
+                plan.hgvm_directory.get("hgvm.json"))
+            RealtimeLogger.info("Imported UUID: {}".format(
+                manifest.get("uuid", None)))
         
         if options.dump_hgvm is not None:
             # Dump it again. TODO: unify dump logic
@@ -1117,10 +1133,19 @@ def pileup_on_hgvm_job(job, options, hgvm, gam_id):
     
     # TODO: configure filtering and stuff
     
-    with job.fileStore.writeGlobalFileStream() as (pileup_handle, pileup_id):
-        # Pile up and stream the pileup to the file store
-        options.drunner.call(job, [vg_args], outfile=pileup_handle,
-            work_dir=work_dir)
+    try:
+        with job.fileStore.writeGlobalFileStream() as (pileup_handle, pileup_id):
+            # Pile up and stream the pileup to the file store
+            options.drunner.call(job, [vg_args], outfile=pileup_handle,
+                work_dir=work_dir)
+    except Exception as e:
+        logging.error("Failed. Dumping files.")
+        
+        hgvm.add("aligned.gam", gam_id)
+        hgvm.dump(job.fileStore, "/home/anovak/dump/{}".format(
+            random.randint(0, 1000000000)))
+        raise e
+    
     
     return pileup_id
     
@@ -1132,8 +1157,6 @@ def call_on_hgvm_job(job, options, hgvm, pileup_id, vcf=False):
     
     """
 
-    # Define a work_dir so Docker can work
-    work_dir = job.fileStore.getLocalTempDir()
 
     if hgvm.has_file("hgvm.json"):
         # Load the manifest, which lists the primary paths, which we want to
@@ -1145,52 +1168,18 @@ def call_on_hgvm_job(job, options, hgvm, pileup_id, vcf=False):
         RealtimeLogger.warn("Creating fake manifest with no primary paths!")
         manifest = Manifest()
         
-    # Download the vg
-    vg_filename = "hgvm.vg"
-    job.fileStore.readGlobalFile(hgvm.get("hgvm.vg"),
-        os.path.join(work_dir, vg_filename))
+    # Kick off a job to do the actual calling, and return the vcf/loci and the
+    # augmented graph.
+    call_job = job.addChildJobFn(toilvgfacade.vg_call_job, options,
+        hgvm.get("hgvm.vg"), pileup_id, vcf=vcf,
+        primary_paths=manifest.get("primary_paths", []))
         
-    # Download the pileup
-    pileup_filename = "pileup.vgpu"
-    job.fileStore.readGlobalFile(pileup_id,
-        os.path.join(work_dir, pileup_filename))
-    
-    # Pick an augmented graph filename
-    augmented_filename = "augmented.vg"
-    
-    # Make arguments to annotate all the reference paths
-    ref_args = []
-    for ref_path in manifest.get("primary_paths", []):
-        # For every primary path we have defined, tell the caller to use it as a
-        # reference path.
-        ref_args.append("--ref")
-        ref_args.append(ref_path)
-    
-    # Set up the VG run
-    vg_args = ["vg", "call", "--aug-graph", augmented_filename, vg_filename,
-        pileup_filename] + ref_args
-        
-    if not vcf:
-        # Don'tmake a VCF
-        vg_args.append("--no-vcf")
-    
-    # TODO: configure thresholds and filters
-    
-    with job.fileStore.writeGlobalFileStream() as (output_handle, output_id):
-        # Call and stream the Locus or VCF data to the file store
-        options.drunner.call(job, [vg_args], outfile=output_handle,
-            work_dir=work_dir)
-        
-    # Upload the augmented graph
-    augmented_id = job.fileStore.writeGlobalFile(
-        os.path.join(work_dir, augmented_filename))
-    
-    # Put the files in a Directory
-    results = Directory()
-    results.add("augmented.vg", augmented_id)
-    results.add("calls.vcf" if vcf else "calls.loci", output_id)
-    
-    return results
+    # Package the results into a directory and return it.
+    return ToilPromise.wrap(call_job
+        ).then(lambda (output_id, augmented_id): Directory({
+            "calls.vcf" if vcf else "calls.loci": output_id,
+            "augmented.vg": augmented_id
+        })).unwrap_result()
     
 def subset_graph_job(job, options, eval_plan, call_directory):
     """
@@ -1410,15 +1399,17 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
         # or None if no control graph is specified.
         control_length_promise = None
         
-        if eval_plan.get_control_graph_id() is not None:
+        control_hgvm = eval_plan.get_packaged_control()
+        
+        if control_hgvm is not None:
             # Add in the control. TODO: assumes it is already indexed. We should
             # check and index it if it's not.
-            graphs_to_test["control"] = eval_plan.get_packaged_control()
+            graphs_to_test["control"] = control_hgvm
             
             # Get a promise for the control's length
             control_length_promise=ToilPromise.wrap(job.addChildJobFn(
                 measure_graph_job, options,
-                eval_plan.get_control_graph_id(),
+                control_hgvm.get("hgvm.vg"),
                 cores=1, memory="50G", disk="50G"))
         else:
             # Say we can't know the control's length
@@ -1428,7 +1419,7 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
             # Looping over the experimental and the control...
         
             align_job = job.addChildJobFn(align_to_hgvm_chunked_job, options,
-                hgvm, fastqs=eval_plan.get_fastq_ids(),
+                package, fastqs=eval_plan.get_fastq_ids(),
                 cores=16, memory="50G", disk="100G")
             # Put it in a Directory in a promise
             align_promise = ToilPromise.wrap(align_job).then(
@@ -1436,7 +1427,7 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
             
             # Then do the pileup
             pileup_job = align_job.addFollowOnJobFn(pileup_on_hgvm_job, options,
-                hgvm, align_job.rv(),
+                package, align_job.rv(),
                 cores=1, memory="50G", disk="100G")
             # Put it in a Directory in a promise
             pileup_promise = ToilPromise.wrap(pileup_job).then(
@@ -1444,7 +1435,7 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
             
             # Then do the calling
             call_job = pileup_job.addFollowOnJobFn(call_on_hgvm_job, options,
-                hgvm, pileup_job.rv(),
+                package, pileup_job.rv(),
                 cores=1, memory="100G", disk="50G")
             # And a promise for the call results directory.
             call_promise = ToilPromise.wrap(call_job)
@@ -1474,6 +1465,11 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
                     align_to_hgvm_chunked_job, options, package_job.rv(),
                     sequences=eval_plan.get_eval_sequences_id(),
                     cores=16, memory="50G", disk="100G")
+                # And put that in a directory
+                realign_promise = ToilPromise.wrap(realign_job).then(
+                    lambda id: Directory({"realigned.gam": id}))
+                # And merge it with the others
+                dir_promises.append(realign_promise)
                     
                 # Then get the stats
                 stats_job = realign_job.addFollowOnJobFn(realignment_stats_job,
@@ -1516,11 +1512,15 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
                 options, eval_plan, graphs_to_test["control"].get("hgvm.vg"),
                 realign_job.rv(),
                 cores=1, memory="50G", disk="100G")
-            # And put them in a directory
-            stats_promise = ToilPromise.wrap(stats_job).then(
-                lambda id: Directory({"stats.tsv": id}))
+                
+            # Put both in a directory
+            realign_dir_promise = ToilPromise.all({
+                "realigned.gam": ToilPromise.wrap(realign_job),
+                "stats.tsv": ToilPromise.wrap(stats_job)
+            }).then(lambda x: Directory(x))
+                
             # And make a directory with just the stats for this condition
-            eval_promises[condition] = stats_promise
+            eval_promises[condition] = realign_dir_promise
             
             # Then parse them
             stats_parse_job = stats_job.addFollowOnJobFn(
@@ -1528,6 +1528,40 @@ def hgvm_eval_job(job, options, eval_plan, hgvm):
                 options, eval_plan, stats_job.rv())
             # And make a promise and save it
             stats_promises[condition] = ToilPromise.wrap(stats_parse_job)
+            
+        if eval_plan.get_eval_sequences_id() is not None:
+            # We can do an evaluation realigning the test sequences against just
+            # the HGVM itself, with no calling
+            condition = "nocall"
+            
+            # Realign and grab the realigned GAM
+            realign_job = job.addChildJobFn(align_to_hgvm_chunked_job,
+                options, hgvm,
+                sequences=eval_plan.get_eval_sequences_id(),
+                cores=16, memory="50G", disk="100G")
+                
+            # Then get the stats
+            stats_job = realign_job.addFollowOnJobFn(realignment_stats_job,
+                options, eval_plan, hgvm.get("hgvm.vg"),
+                realign_job.rv(),
+                cores=1, memory="50G", disk="100G")
+                
+            # Put both in a directory
+            realign_dir_promise = ToilPromise.all({
+                "realigned.gam": ToilPromise.wrap(realign_job),
+                "stats.tsv": ToilPromise.wrap(stats_job)
+            }).then(lambda x: Directory(x))
+                
+            # And make a directory with just the stats for this condition
+            eval_promises[condition] = realign_dir_promise
+            
+            # Then parse them
+            stats_parse_job = stats_job.addFollowOnJobFn(
+                parse_realignment_stats_job,
+                options, eval_plan, stats_job.rv())
+            # And make a promise and save it
+            stats_promises[condition] = ToilPromise.wrap(stats_parse_job)
+            
                 
         # Now we have evaluated all the conditions. Make a plot TSV.
         
@@ -1611,6 +1645,10 @@ def measure_sv_recall_job(job, options, call_dir, truth_vcfs, sample_name,
     # at
     recalling_positions = collections.defaultdict(set)
                 
+    # This holds a set of seen CHROM, POS pairs, so we don't count the duplicate
+    # multiple-lengths-of-a-single-SV variants as the same variant.
+    seen_truth_starts = set()
+                
     # Then loop over the truth VCFs
     for vcf_id in truth_vcfs:
         with job.fileStore.readGlobalFileStream(vcf_id) as truth:
@@ -1629,6 +1667,15 @@ def measure_sv_recall_job(job, options, call_dir, truth_vcfs, sample_name,
                 if record.genotype(sample_name)["GT"] in {"0/0", "0|0", "0"}:
                     # Skip SVs that aren't actually supposed to be in the sample
                     continue
+                    
+                # Has this been seen before?
+                pos_key = (record.CHROM, record.POS)
+                if pos_key in seen_truth_starts:
+                    # This has been seen before (or another variant at the same
+                    # site, which we're going to consider the same for our
+                    # purposes).
+                    continue
+                seen_truth_starts.add(pos_key)
                     
                 # This is an SV
                 total_svs += 1
@@ -1840,9 +1887,10 @@ def main(args):
                 options.base_vg_url, options.hgvm_url)
                 
             # Also build the realignment evaluation plan on the head node
-            eval_plan = create_eval_plan(options.control_graph_url,
-                options.control_graph_xg_url, options.control_graph_gcsa_url,
-                options.sample_fastq_url, options.eval_sequences_url)
+            eval_plan = create_eval_plan(options.control_graph_hgvm_url, 
+                options.control_graph_url, options.control_graph_xg_url,
+                options.control_graph_gcsa_url, options.sample_fastq_url,
+                options.eval_sequences_url)
                 
             # And the SV recall plan
             recall_plan = create_recall_plan(options.sv_sample_fastq_url,

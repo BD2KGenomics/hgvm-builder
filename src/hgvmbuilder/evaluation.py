@@ -45,6 +45,8 @@ class EvaluationPlan(object):
         self.control_graph_gcsa_url = None
         # And to its GCSA LCP file
         self.control_graph_gcsa_lcp_url = None
+        # We could also use an HGVM as a control instead
+        self.control_graph_hgvm_url = None
         
         # Then these will hold the IDs
         self.fastq_ids = []
@@ -53,6 +55,8 @@ class EvaluationPlan(object):
         self.xg_ids = {}
         # This maps from vg ID to gcsa and lcp index ID pair
         self.gcsa_lcp_ids = {}
+        # This holds a directory for a control HGVM
+        self.control_hgvm_directory = None
         
         
     def add_fastq(self, fastq_url):
@@ -71,6 +75,14 @@ class EvaluationPlan(object):
         """
         
         self.eval_sequences_url = url
+        
+    def set_control_hgvm(self, url):
+        """
+        Set the given HGVM base url (containing hgvm.json) as the HGVM to use
+        for comparison to the experimental graph.
+        """
+        
+        self.control_graph_hgvm_url = url
         
     def set_control_graph(self, url):
         """
@@ -100,15 +112,6 @@ class EvaluationPlan(object):
         """
         
         return self.fastq_ids
-        
-    def get_control_graph_id(self):
-        """
-        Return the file ID of the control graph, or None if no such graph was
-        specified.
-        
-        """
-        
-        return self.control_graph_id
         
     def get_xg_id(self, vg_id):
         """
@@ -153,22 +156,31 @@ class EvaluationPlan(object):
     def get_packaged_control(self):
         """
         Package up the control graph from the evaluation plan as a Directory.
-        Assumes the control index was already provided.
+        Assumes the control index was already provided if a graph was provided.
+        Returns None if no control graph is available.
         
         """
         
-        vg_id = self.get_control_graph_id()
-        
-        package = Directory({
-            "hgvm.vg": vg_id,
-            "hgvm.xg": self.get_xg_id(vg_id),
-            "hgvm.gcsa": self.get_gcsa_id(vg_id),
-            "hgvm.gcsa.lcp": self.get_lcp_id(vg_id)
-        })
-        
-        # TODO: Manifest!
-        
-        return package
+        if self.control_hgvm_directory is not None:
+            # We already have a packaged graph for this
+            return self.control_hgvm_directory
+        elif self.control_graph_id is not None:
+            # We only have a bare graph and its associated index files
+            vg_id = self.control_graph_id
+            
+            package = Directory({
+                "hgvm.vg": vg_id,
+                "hgvm.xg": self.get_xg_id(vg_id),
+                "hgvm.gcsa": self.get_gcsa_id(vg_id),
+                "hgvm.gcsa.lcp": self.get_lcp_id(vg_id)
+            })
+            
+            # TODO: Manifest!
+            
+            return package
+        else:
+            # We weren't given anything
+            return None
         
     def bake(self, import_function):
         """
@@ -195,7 +207,13 @@ class EvaluationPlan(object):
         else:
             self.eval_sequences_id = None
             
-        if self.control_graph_url is not None:
+        if self.control_graph_hgvm_url is not None:
+            # Just import this whole directory.
+            # If we can't iterate it, grab these specific files.
+            self.control_hgvm_directory = Directory.import_from(import_function,
+                self.control_graph_hgvm_url, file_names = ["hgvm.json",
+                    "hgvm.vg", "hgvm.xg", "hgvm.gcsa", "hgvm.gcsa.lcp"])
+        elif self.control_graph_url is not None:
             # Grab the control graph since it exists
             self.control_graph_id = import_function(self.control_graph_url)
             

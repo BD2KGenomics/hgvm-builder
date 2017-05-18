@@ -22,6 +22,7 @@ import timeit
 import toil_vg.vg_common
 import toil_vg.vg_config
 import toil_vg.vg_index
+import toil_vg.vg_call
 
 from toil.realtimeLogger import RealtimeLogger
 
@@ -64,7 +65,11 @@ class OptionFilter(object):
 option_blacklist = {
     "wrapperscript": {"out_store", "tool"},
     "common": {"force_outstore"},
-    "index": {"index_name", "graphs", "chroms"}
+    "index": {"index_name", "graphs", "chroms"},
+    # TODO: we can't use most of the toil-vg call logic because it's too tied to
+    # chunking and having a single reference path.
+    "call": {"overlap", "call_chunk_size", "genotype", "genotype_opts",
+        "filter_opts"}
 }
 
 # TODO: Un-blacklist --config and add logic to import the config file and send
@@ -91,6 +96,12 @@ def add_options(parser):
         "options to configure involations of `vg index`")
     toil_vg.vg_index.index_parse_args(OptionFilter(index_group,
         option_blacklist["index"]))
+        
+    # And the call options
+    call_group = parser.add_argument_group("VG Calling",
+        "options to configure involations of `vg call`")
+    toil_vg.vg_call.chunked_call_parse_args(OptionFilter(call_group,
+        option_blacklist["call"]))
         
 def initialize(options):
     """
@@ -214,21 +225,95 @@ def gcsa_index_job(job, options, vg_ids, primary_path_names=None):
     # We also need a "chroms" giving the primary path for each graph. It's OK if
     # the path doesn't exist in a given graph, but if it does it will be added
     # to the index.
-    if primary_path_names is not None:
-        # We have primary path names to use
-        assert(len(primary_path_names) == len(vg_ids))
-        options.chroms = primary_path_names
-    else:
-        # Fake path names
-        options.chroms = ["" for x in vg_ids]
+    
+    # We have primary path names to use. We can just try and retain all ther
+    # paths in all graphs.
+    RealtimeLogger.info("Want to GCSA-index {} with paths {}".format(
+        vg_ids, primary_path_names))
+
+    # Fake path names
+    options.chroms = ["fake{}".format(i) for i in xrange(len(vg_ids))]
     
     # options.index_name has to have the basename for the .gcsa in the local
     # temp dir.
     options.index_name = "gcsaindex"
     
     return job.addChildJobFn(toil_vg.vg_index.run_gcsa_prep, options, vg_ids,
+        primary_path_override=primary_path_names,
         cores=options.misc_cores, memory=options.misc_mem,
         disk=options.misc_disk).rv()
+        
+def vg_call_job(job, options, vg_id, pileup_id, vcf=False, primary_paths=[]):
+    """
+    Given a vg file ID and a pileup file ID, produce variant calls in Locus or
+    VCF format. Returns a pair of the VCF or locus file ID and the augmented
+    graph file ID.
+    
+    if vcf is true, returns VCF oformat. Otherwise, returns Locus format. If
+    primary_paths is non-empty, passes those primary path names to vg call to
+    override its autodetection logic.
+    
+    Handles requirements itself.
+    
+    TODO: change toil-vg to allow not forcing a single contig and actually use
+    it.
+    
+    """
+    
+    return job.addChildJobFn(run_vg_call, options, vg_id, pileup_id, vcf,
+        primary_paths,
+        cores=options.calling_cores, memory="100G", disk="50G").rv()
+        
+def run_vg_call(job, options, vg_id, pileup_id, vcf, primary_paths):
+    """
+    Actually run vg call on a given pileup. Separate toil-gv-style job to make
+    requirement abstraction work.
+    """
+    
+    # Define a work_dir so Docker can work
+    work_dir = job.fileStore.getLocalTempDir()
+    
+    # Download the vg
+    vg_filename = "hgvm.vg"
+    job.fileStore.readGlobalFile(vg_id, os.path.join(work_dir, vg_filename))
+        
+    # Download the pileup
+    pileup_filename = "pileup.vgpu"
+    job.fileStore.readGlobalFile(pileup_id, os.path.join(work_dir,
+        pileup_filename))
+    
+    # Pick an augmented graph filename
+    augmented_filename = "augmented.vg"
+    
+    # Make arguments to annotate all the reference paths
+    ref_args = []
+    for ref_path in primary_paths:
+        # For every primary path we have defined, tell the caller to use it as a
+        # reference path.
+        ref_args.append("--ref")
+        ref_args.append(ref_path)
+    
+    # Set up the VG run. Make sure to pass any user-defined call options that
+    # configure thresholds and filters.
+    vg_args = (["vg", "call", "-t", str(options.calling_cores), "--aug-graph",
+        augmented_filename, vg_filename, pileup_filename] + ref_args +
+        options.call_opts)
+        
+    if not vcf:
+        # Don'tmake a VCF
+        vg_args.append("--no-vcf")
+    
+    with job.fileStore.writeGlobalFileStream() as (output_handle, output_id):
+        # Call and stream the Locus or VCF data to the file store
+        options.drunner.call(job, [vg_args], outfile=output_handle,
+            work_dir=work_dir)
+        
+    # Upload the augmented graph
+    augmented_id = job.fileStore.writeGlobalFile(
+        os.path.join(work_dir, augmented_filename))
+    
+    # Return the file IDs
+    return output_id, augmented_id
         
 def id_range_job(job, options, vg_id):
     """

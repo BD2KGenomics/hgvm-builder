@@ -62,7 +62,7 @@ def parse_args(args):
     Job.Runner.addToilOptions(parser)
     
     parser.add_argument("--contig", default=None,
-        help="download just pairs touching this contig")
+        help="download just pairs touching this contig or its alts/randoms")
     
     parser.add_argument("--sam_url", default=[], action="append",
         help="URL to download reads from, accessible from Toil nodes")
